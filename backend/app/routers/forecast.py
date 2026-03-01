@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 import logging
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -128,20 +129,62 @@ def _normalise_runtime(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Store selection
+# ---------------------------------------------------------------------------
+
+def _select_store(state, age_hours: int):
+    """
+    Return the xr.Dataset for the most-recent cycle that is at least
+    ``age_hours`` older than the current cycle.
+
+    age_hours=0 → current cycle (fast path, no tag parsing).
+    """
+    if age_hours == 0:
+        return state.ds
+
+    current_dt = datetime.strptime(state.current_tag, "%Y%m%d_%H")
+    target_dt  = current_dt - timedelta(hours=age_hours)
+
+    candidates = [
+        (tag, datetime.strptime(tag, "%Y%m%d_%H"))
+        for tag in state.stores
+        if datetime.strptime(tag, "%Y%m%d_%H") <= target_dt
+    ]
+
+    if not candidates:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message":          f"No cycle available ≥ {age_hours}h before current.",
+                "current_cycle":    state.current_tag,
+                "requested_age_hours": age_hours,
+                "available_cycles": sorted(state.stores.keys()),
+            },
+        )
+
+    best_tag = max(candidates, key=lambda x: x[1])[0]
+    return state.stores[best_tag]
+
+
+# ---------------------------------------------------------------------------
 # Route
 # ---------------------------------------------------------------------------
 
 @router.get("/forecast")
 def get_forecast(
     request: Request,
-    lat:   float         = Query(..., ge=-90.0,  le=90.0,
-                                 description="Latitude (decimal degrees)"),
-    lon:   float         = Query(..., ge=-180.0, le=360.0,
-                                 description="Longitude (decimal degrees, ±180 or 0–360)"),
-    vars:  str           = Query(...,
-                                 description="Comma-separated variable names (plain, no unit suffix)"),
-    start: Optional[str] = Query(None, description="Start time, ISO-8601 UTC (inclusive)"),
-    end:   Optional[str] = Query(None, description="End time, ISO-8601 UTC (inclusive)"),
+    lat:       float         = Query(..., ge=-90.0,  le=90.0,
+                                     description="Latitude (decimal degrees)"),
+    lon:       float         = Query(..., ge=-180.0, le=360.0,
+                                     description="Longitude (decimal degrees, ±180 or 0–360)"),
+    vars:      str           = Query(...,
+                                     description="Comma-separated variable names (plain, no unit suffix)"),
+    start:     Optional[str] = Query(None, description="Start time, ISO-8601 UTC (inclusive)"),
+    end:       Optional[str] = Query(None, description="End time, ISO-8601 UTC (inclusive)"),
+    age_hours: int           = Query(0, ge=0,
+                                     description="Return the most-recent cycle at least this many "
+                                                 "hours older than the current run (0 = current). "
+                                                 "Use /status for available cycles."),
 ) -> dict:
     """
     Return a compact parallel-array forecast for the nearest NBM grid point.
@@ -152,7 +195,7 @@ def get_forecast(
     its forecast horizon) are JSON `null`.
     """
     state    = request.app.state
-    ds       = state.ds
+    ds       = _select_store(state, age_hours)
     registry = state.registry
 
     # Normalise lon to ±180

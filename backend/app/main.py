@@ -29,6 +29,7 @@ Production
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,16 +56,54 @@ ZARR_LIVE: Path = ZARR_DIR / "current"
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _discover_cycle_tags(zarr_dir: Path) -> list[str]:
+    """
+    Return a sorted list of cycle directory names matching %Y%m%d_%H.
+
+    Skips symlinks and non-directories (e.g. the 'current' symlink).
+    """
+    tags = []
+    for entry in zarr_dir.iterdir():
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            datetime.strptime(entry.name, "%Y%m%d_%H")
+            tags.append(entry.name)
+        except ValueError:
+            pass
+    return sorted(tags)
+
+
 def _load_state(app: FastAPI) -> None:
     """
-    (Re)load the Zarr store and registry into app.state.
+    (Re)load the Zarr store(s) and registry into app.state.
 
-    Called once at startup and again on POST /admin/reload.
+    Opens all retained named cycle stores into app.state.stores and resolves
+    the current cycle via the 'current' symlink.  Called once at startup and
+    again on POST /admin/reload.
     Raises FileNotFoundError if the Zarr store does not exist yet.
     """
     registry = VariableRegistry(VARIABLES_YAML)
-    ds = open_zarr_store(ZARR_LIVE)
 
+    # Open all retained cycle stores (lazy xarray/zarr — just reads metadata)
+    tags = _discover_cycle_tags(ZARR_DIR)
+    stores: dict[str, object] = {}
+    for tag in tags:
+        try:
+            stores[tag] = open_zarr_store(ZARR_DIR / tag)
+        except Exception as exc:
+            log.warning(f"Could not open cycle store {tag}: {exc}")
+
+    # Resolve current cycle tag from symlink
+    current_tag = Path(os.readlink(ZARR_LIVE)).name
+    if current_tag not in stores:
+        # Fallback: open it directly if not already in stores
+        stores[current_tag] = open_zarr_store(ZARR_LIVE)
+
+    ds = stores[current_tag]
+
+    app.state.stores      = stores
+    app.state.current_tag = current_tag
     app.state.ds          = ds
     app.state.registry    = registry
     app.state.zarr_path   = ZARR_LIVE
@@ -73,7 +112,8 @@ def _load_state(app: FastAPI) -> None:
     log.info(
         f"State loaded — cycle: {ds.attrs.get('cycle', 'unknown')}  "
         f"| {len(ds.data_vars)} variables  "
-        f"| {ds.sizes.get('valid_time', '?')} time steps"
+        f"| {ds.sizes.get('valid_time', '?')} time steps  "
+        f"| {len(stores)} retained cycle(s): {sorted(stores.keys())}"
     )
 
 
@@ -95,6 +135,8 @@ async def lifespan(app: FastAPI):
             f"Run the ingestion + post-processor first, then restart the API. "
             f"The /forecast endpoint will return 503 until the store is available."
         )
+        app.state.stores      = {}
+        app.state.current_tag = None
         app.state.ds          = None
         app.state.registry    = VariableRegistry(VARIABLES_YAML)
         app.state.zarr_path   = ZARR_LIVE

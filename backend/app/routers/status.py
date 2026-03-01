@@ -23,6 +23,7 @@ def get_status(request: Request) -> StatusResponse:
     n_vars    = len(ds.data_vars)
     n_steps   = int(ds.sizes.get("valid_time", 0))
     cycle     = ds.attrs.get("cycle", None)
+    available_cycles = sorted(getattr(state, "stores", {}).keys())
 
     return StatusResponse(
         runtime=cycle,
@@ -30,4 +31,5 @@ def get_status(request: Request) -> StatusResponse:
         n_variables=n_vars,
         n_time_steps=n_steps,
         last_loaded=state.last_loaded,
+        available_cycles=available_cycles,
     )
