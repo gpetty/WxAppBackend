@@ -38,22 +38,70 @@ log = logging.getLogger(__name__)
 # NBM forecast hour schedule
 # ---------------------------------------------------------------------------
 
-def nbm_forecast_hours(fxx_max: int = 262) -> list[int]:
+def nbm_forecast_hours(fxx_max: int = 260) -> list[int]:
     """
-    Return the ordered list of NBM CONUS forecast hours up to fxx_max.
+    Fallback fxx schedule used when the S3 directory listing is unavailable.
 
-    Verified against noaa-nbm-grib2-pds S3 bucket (2026-02-27):
+    Verified against noaa-nbm-grib2-pds S3 bucket (2026-03-01, 16Z cycle):
         f001–f036 : hourly   (step 1)  — available on NOMADS and S3
-        f037–f190 : 3-hourly (step 3)  — S3 only
-        f196–f262 : 6-hourly (step 6)  — S3 only
+        f038–f188 : 3-hourly (step 3)  — S3 only
+        f194–f260 : 6-hourly (step 6)  — S3 only
 
-    Total: 36 + 52 + 12 = 100 files per cycle.
+    The schedule varies between cycles; prefer list_available_fxx() which
+    queries S3 directly rather than assuming a fixed pattern.
     """
     fxx: list[int] = []
     fxx += [h for h in range(1,   37)        if h <= fxx_max]   # hourly
-    fxx += [h for h in range(37,  191, 3)    if h <= fxx_max]   # 3-hourly
-    fxx += [h for h in range(196, 263, 6)    if h <= fxx_max]   # 6-hourly
+    fxx += [h for h in range(38,  189, 3)    if h <= fxx_max]   # 3-hourly
+    fxx += [h for h in range(194, 261, 6)    if h <= fxx_max]   # 6-hourly
     return fxx
+
+
+def list_available_fxx(
+    cycle_time: datetime,
+    product: str = NBM_PRODUCT,
+    fxx_max: int = 270,
+) -> list[int]:
+    """
+    Query the S3 directory listing for *cycle_time* and return the sorted list
+    of fxx values actually present for *product* (e.g. ``"co"``).
+
+    This avoids issuing HTTP requests for files that don't exist, eliminating
+    spurious "GRIB2 file not found" warnings for non-existent fxx values.
+
+    Falls back to ``nbm_forecast_hours()`` if the S3 listing fails.
+    """
+    import re
+    import s3fs
+
+    bucket_path = (
+        f"noaa-nbm-grib2-pds/blend.{cycle_time:%Y%m%d}/{cycle_time:%H}/core"
+    )
+    pattern = re.compile(
+        rf"blend\.t{cycle_time:%H}z\.core\.f(\d{{3}})\.{product}\.grib2$"
+    )
+
+    try:
+        fs = s3fs.S3FileSystem(anon=True)
+        files = fs.ls(bucket_path)
+        fxx_list = []
+        for f in files:
+            m = pattern.search(f)
+            if m:
+                fxx_val = int(m.group(1))
+                if fxx_val <= fxx_max:
+                    fxx_list.append(fxx_val)
+        if fxx_list:
+            log.info(
+                f"S3 listing: {len(fxx_list)} {product} files available "
+                f"for {cycle_time:%Y-%m-%d %H}Z"
+            )
+            return sorted(fxx_list)
+        log.warning("S3 listing returned no matching files; using fallback schedule")
+    except Exception as exc:
+        log.warning(f"S3 listing failed ({exc}); using fallback schedule")
+
+    return nbm_forecast_hours(fxx_max)
 
 
 # ---------------------------------------------------------------------------
@@ -108,15 +156,26 @@ class IngestLock:
         self.path = lock_path
 
     def __enter__(self) -> "IngestLock":
+        import os
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
-            pid = self.path.read_text().strip()
-            raise LockError(
-                f"Lock file exists ({self.path}). "
-                f"Is another ingestion running? (PID {pid})\n"
-                f"If not, delete the lock file and retry."
-            )
-        import os
+            pid_str = self.path.read_text().strip()
+            stale = False
+            try:
+                pid = int(pid_str)
+                os.kill(pid, 0)   # signal 0: check existence only, no-op if running
+            except (ValueError, ProcessLookupError):
+                stale = True      # PID is gone
+            except PermissionError:
+                stale = False     # process exists but owned by another user — treat as live
+            if stale:
+                log.warning(f"Removing stale lock file (PID {pid_str} no longer running).")
+                self.path.unlink()
+            else:
+                raise LockError(
+                    f"Lock file exists ({self.path}). "
+                    f"Ingestion already running as PID {pid_str}."
+                )
         self.path.write_text(str(os.getpid()))
         log.debug(f"Lock acquired: {self.path}")
         return self
@@ -156,6 +215,9 @@ def _download_one(
             priority=["aws", "nomads"],
         )
         local = H.download()
+        if local is None:
+            log.warning(f"  fxx={fxx:03d} FAILED: Herbie returned None (file not found on any source)")
+            return fxx, None
         return fxx, Path(local)
     except Exception as exc:
         log.warning(f"  fxx={fxx:03d} FAILED: {exc}")
@@ -163,38 +225,24 @@ def _download_one(
 
 
 # ---------------------------------------------------------------------------
-# Full-cycle download
+# Batch download (one parallel pass through a list of fxx values)
 # ---------------------------------------------------------------------------
 
-def download_cycle(
+def _download_batch(
     cycle_time: datetime,
+    fxx_list: list[int],
     staging_dir: Path,
-    fxx_max: int = 264,
-    workers: int = DOWNLOAD_WORKERS,
-    dry_run: bool = False,
-) -> dict[int, Path]:
+    workers: int,
+) -> tuple[dict[int, Path], list[int]]:
     """
-    Download all forecast hours for cycle_time into staging_dir.
-
-    Returns a dict mapping fxx → local file path for every successful download.
-    Raises RuntimeError if any files fail.
+    Attempt to download a list of forecast-hour files in parallel.
+    Returns (successes, failures) where successes maps fxx → local path.
     """
-    fxx_list = nbm_forecast_hours(fxx_max)
-    total = len(fxx_list)
-    staging_dir.mkdir(parents=True, exist_ok=True)
-
-    log.info(f"Cycle: {cycle_time:%Y-%m-%d %H}Z | "
-             f"{total} forecast hours | fxx 001–{fxx_max:03d} | "
-             f"{workers} workers")
-
-    if dry_run:
-        log.info("[DRY RUN] Skipping actual downloads.")
-        return {}
-
     results: dict[int, Path] = {}
     failures: list[int] = []
-    t0 = time.monotonic()
+    total = len(fxx_list)
     done = 0
+    t0 = time.monotonic()
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
@@ -208,7 +256,6 @@ def download_cycle(
                 results[fxx] = path
             else:
                 failures.append(fxx)
-            # Progress report every 10 files
             if done % 10 == 0 or done == total:
                 elapsed = time.monotonic() - t0
                 rate = done / elapsed if elapsed > 0 else 0
@@ -218,13 +265,111 @@ def download_cycle(
                          f"{elapsed:5.0f}s elapsed  "
                          f"ETA ~{eta:4.0f}s")
 
-    elapsed = time.monotonic() - t0
-    log.info(f"Download complete: {len(results)}/{total} files in {elapsed:.0f}s")
+    return results, failures
 
-    if failures:
+
+# ---------------------------------------------------------------------------
+# Full-cycle download
+# ---------------------------------------------------------------------------
+
+def download_cycle(
+    cycle_time: datetime,
+    staging_dir: Path,
+    fxx_max: int = 260,
+    workers: int = DOWNLOAD_WORKERS,
+    dry_run: bool = False,
+    max_retries: int = 5,
+    retry_delay: int = 300,
+) -> dict[int, Path]:
+    """
+    Download all forecast hours for cycle_time into staging_dir.
+
+    On each pass the function queries the S3 directory listing to learn which
+    files exist, then downloads only those not yet retrieved.  This eliminates
+    spurious "file not found" warnings for fxx values that do not exist on S3.
+
+    Passes continue (up to max_retries) for two distinct reasons:
+
+      1. Extended-range files (fxx > 36) are posted to S3 progressively,
+         typically 30–90 min after the hourly segment.  Re-listing S3 on each
+         pass discovers newly-arrived files that weren't there on the previous
+         pass.
+      2. Transient download failures are retried automatically: a failed fxx
+         stays absent from ``results`` and is re-attempted the next time it
+         appears in the S3 listing.
+
+    Raises RuntimeError only if a file confirmed present on S3 still cannot be
+    downloaded after all retries.  Expected files that never appear on S3 are
+    logged as warnings (the schedule can vary by cycle).
+
+    Returns a dict mapping fxx → local file path for every successful download.
+    """
+    # Static schedule used only as the "target" set for completion check.
+    expected = set(nbm_forecast_hours(fxx_max))
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info(f"Cycle: {cycle_time:%Y-%m-%d %H}Z | "
+             f"target {len(expected)} forecast hours up to fxx {fxx_max:03d} | "
+             f"{workers} workers")
+
+    if dry_run:
+        log.info("[DRY RUN] Skipping actual downloads.")
+        return {}
+
+    t0 = time.monotonic()
+    results: dict[int, Path] = {}
+    download_failures: list[int] = []
+
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            log.info(
+                f"Pass {attempt + 1}/{max_retries + 1}: waiting {retry_delay}s "
+                f"(polling for extended-range files and retrying failures)..."
+            )
+            time.sleep(retry_delay)
+
+        # Fresh S3 listing — discovers files posted since the previous pass.
+        available = list_available_fxx(cycle_time, fxx_max=fxx_max)
+        to_download = [f for f in available if f not in results]
+
+        log.info(
+            f"Pass {attempt + 1}/{max_retries + 1}: "
+            f"{len(available)} on S3  |  "
+            f"{len(results)} downloaded  |  "
+            f"{len(to_download)} to fetch"
+        )
+
+        if to_download:
+            batch_results, download_failures = _download_batch(
+                cycle_time, to_download, staging_dir, workers
+            )
+            results.update(batch_results)
+        else:
+            download_failures = []
+
+        # Early exit: nothing left to fetch from the current S3 listing and no failures.
+        remaining = [f for f in available if f not in results]
+        if not remaining and not download_failures:
+            log.info("All S3-listed files retrieved.")
+            break
+
+    elapsed = time.monotonic() - t0
+    log.info(f"Download complete: {len(results)}/{len(expected)} expected files "
+             f"in {elapsed:.0f}s")
+
+    # Raise only for confirmed S3 files that still couldn't be downloaded.
+    if download_failures:
         raise RuntimeError(
-            f"{len(failures)} files failed to download: "
-            f"fxx={sorted(failures)}"
+            f"{len(download_failures)} files still failing after {max_retries} retries: "
+            f"fxx={sorted(download_failures)}"
+        )
+
+    # Warn about expected files that never appeared on S3 (schedule can vary).
+    missing = expected - set(results)
+    if missing:
+        log.warning(
+            f"{len(missing)} expected fxx values not found on S3 after all passes: "
+            f"fxx={sorted(missing)}"
         )
 
     return results
@@ -267,12 +412,14 @@ def read_manifest(staging_dir: Path) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def run_ingestion(
-    fxx_max: int = 264,
+    fxx_max: int = 260,
     workers: int = DOWNLOAD_WORKERS,
     dry_run: bool = False,
     force: bool = False,
     postprocess: bool = False,
     keep_staging: bool = False,
+    max_retries: int = 5,
+    retry_delay: int = 300,
 ) -> Path:
     """
     Run a full ingestion cycle:
@@ -323,6 +470,7 @@ def run_ingestion(
                 from ..postprocessor import run_postprocessor
                 stats = run_postprocessor(
                     staging_dir=cycle_staging,
+                    cycle_tag=cycle_tag,
                     delete_staging=not keep_staging,
                 )
                 log.info(f"Post-processing stats: {stats}")
@@ -335,6 +483,8 @@ def run_ingestion(
             fxx_max=fxx_max,
             workers=workers,
             dry_run=dry_run,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
         )
 
         # --- Write manifest ---
@@ -349,6 +499,7 @@ def run_ingestion(
             from ..postprocessor import run_postprocessor
             stats = run_postprocessor(
                 staging_dir=cycle_staging,
+                cycle_tag=cycle_tag,
                 delete_staging=not keep_staging,
             )
             log.info(f"Post-processing stats: {stats}")

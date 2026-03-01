@@ -26,14 +26,28 @@ import logging
 import os
 import shutil
 import time
+import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# cfgrib triggers a FutureWarning about xarray's upcoming compat default change;
+# this is internal to cfgrib and not actionable here.
+warnings.filterwarnings(
+    "ignore",
+    message="In a future version of xarray the default value for compat",
+    category=FutureWarning,
+    module="cfgrib",
+)
+
 import numpy as np
 import xarray as xr
 
-from ..config import ZARR_DIR, VARIABLES_YAML
+from ..config import (
+    ZARR_DIR, VARIABLES_YAML,
+    ZARR_RETAIN_DAYS, ZARR_RETAIN_HOURS, POSTPROCESS_WORKERS,
+)
 from ..registry import VariableRegistry, NativeVariable
 from .conversions import get_converter
 
@@ -190,12 +204,88 @@ def _get_valid_time(da: xr.DataArray, var_name: str, fxx: int) -> Optional[np.da
 
 
 # ---------------------------------------------------------------------------
+# Parallel file worker  (top-level so ProcessPoolExecutor can pickle it)
+# ---------------------------------------------------------------------------
+
+def _extract_file_worker(
+    fxx: int,
+    grib2_path: Path,
+    expected_vars: dict[str, "NativeVariable"],
+) -> dict:
+    """
+    Extract all expected variables from one GRIB2 file.
+
+    Designed to run in a worker subprocess via ProcessPoolExecutor.
+    Must be a top-level function so it can be pickled.
+
+    Returns a dict with keys:
+      fxx      : int
+      records  : {var_name: (valid_time_np64, float32_array)}
+      lat      : 2-D latitude array or None
+      lon      : 2-D longitude array or None
+      missing  : [var_name, ...]  — expected but not found
+      logs     : [(level_str, message), ...]  — emitted by main process
+    """
+    logs: list[tuple[str, str]] = []
+    records: dict[str, tuple] = {}
+    missing: list[str] = []
+    lat_2d = lon_2d = None
+
+    datasets = _open_all_datasets(grib2_path)
+    if datasets is None:
+        logs.append(("warning", f"fxx={fxx:03d}: cfgrib failed to open {grib2_path.name}"))
+        return {"fxx": fxx, "records": {}, "lat": None, "lon": None,
+                "missing": list(expected_vars), "logs": logs}
+
+    # Capture lat/lon from first dataset that has spatial coordinates
+    for ds in datasets:
+        if not ds.data_vars:
+            continue
+        da_ref = ds[list(ds.data_vars)[0]]
+        if "latitude" in da_ref.coords:
+            lat_2d = da_ref.coords["latitude"].values
+            lon_2d = da_ref.coords["longitude"].values
+        elif "lat" in da_ref.coords:
+            lat_2d = da_ref.coords["lat"].values
+            lon_2d = da_ref.coords["lon"].values
+        if lat_2d is not None:
+            break
+
+    for var_name, var in expected_vars.items():
+        if var.grib_accum_hours is not None:
+            da = _open_with_accum_filter(grib2_path, var, fxx)
+        else:
+            da = _find_variable_in_datasets(datasets, var)
+
+        if da is None:
+            logs.append(("debug", f"  {var_name}: not found in fxx={fxx:03d}"))
+            missing.append(var_name)
+            continue
+
+        vt = _get_valid_time(da, var_name, fxx)
+        if vt is None:
+            missing.append(var_name)
+            continue
+
+        arr = get_converter(var.units_raw, var.units_out)(da.values).astype(np.float32)
+        records[var_name] = (vt, arr)
+
+    logs.append(("info",
+        f"[{fxx:03d}] {grib2_path.name}: "
+        f"{len(records)} extracted, {len(missing)} missing"
+    ))
+    return {"fxx": fxx, "records": records, "lat": lat_2d, "lon": lon_2d,
+            "missing": missing, "logs": logs}
+
+
+# ---------------------------------------------------------------------------
 # Core extraction loop  (file-centric: one cfgrib open per GRIB2 file)
 # ---------------------------------------------------------------------------
 
 def extract_variables(
     staging_dir: Path,
     registry: VariableRegistry,
+    workers: int = POSTPROCESS_WORKERS,
 ) -> xr.Dataset:
     """
     Extract all native variables from staged GRIB2 files into an xarray
@@ -206,26 +296,23 @@ def extract_variables(
     in that single pass. This is ~15x faster than the alternative of
     iterating files once per variable.
 
+    **Parallel extraction:** files are processed concurrently using
+    ``ProcessPoolExecutor``.  Each worker subprocess handles one GRIB2 file
+    independently, returning extracted arrays to the main process for assembly.
+    Use ``workers=1`` to disable parallelism (useful for debugging).
+
     Variables missing from a file where they are expected log a warning and
     contribute a NaN time step. xarray aligns variables with different
     valid_time arrays when the Dataset is assembled, filling NaN as needed.
     """
-    import cfgrib  # noqa: F401 — imported here to defer the heavy eccodes load
-
     grib2_files = _list_grib2_files(staging_dir)
     if not grib2_files:
         raise FileNotFoundError(f"No GRIB2 files found in {staging_dir}")
 
     n_files = len(grib2_files)
-    log.info(f"Found {n_files} GRIB2 files in {staging_dir}")
+    log.info(f"Found {n_files} GRIB2 files in {staging_dir}  |  workers={workers}")
 
     native_vars = registry.native()
-
-    # Precompute unit converters (avoid repeated registry lookups)
-    converters = {
-        name: get_converter(var.units_raw, var.units_out)
-        for name, var in native_vars.items()
-    }
 
     # Per-variable accumulators: list of (valid_time_ns, 2D float32 array)
     var_records: dict[str, list[tuple[np.datetime64, np.ndarray]]] = {
@@ -238,68 +325,51 @@ def extract_variables(
     lat_2d: Optional[np.ndarray] = None
     lon_2d: Optional[np.ndarray] = None
 
-    # ---- Main loop: one cfgrib open per file --------------------------------
-    for i, (fxx, grib2_path) in enumerate(grib2_files.items(), start=1):
-
-        # Which variables are expected in this file?
+    # ---- Build per-file task list -------------------------------------------
+    # Determine which variables are expected for each fxx and track skips.
+    tasks: list[tuple[int, Path, dict]] = []
+    for fxx, grib2_path in grib2_files.items():
         expected = {
             name: var for name, var in native_vars.items()
             if _should_extract(var, fxx)
         }
-        not_expected = set(native_vars) - set(expected)
-        for name in not_expected:
+        for name in set(native_vars) - set(expected):
             var_skipped[name] += 1
-
         if not expected:
-            log.debug(f"[{i:3d}/{n_files}] fxx={fxx:03d}: no variables expected, skipping")
+            log.debug(f"fxx={fxx:03d}: no variables expected, skipping")
             continue
+        tasks.append((fxx, grib2_path, expected))
 
-        log.info(f"[{i:3d}/{n_files}] fxx={fxx:03d}  {grib2_path.name}")
+    # ---- Parallel extraction via ProcessPoolExecutor ------------------------
+    done = 0
+    n_tasks = len(tasks)
+    t0 = time.monotonic()
 
-        datasets = _open_all_datasets(grib2_path)
-        if datasets is None:
-            for name in expected:
-                var_missing[name] += 1
-            continue
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_extract_file_worker, fxx, path, exp_vars): fxx
+            for fxx, path, exp_vars in tasks
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            done += 1
 
-        # Capture lat/lon once from the first successfully opened file
-        if lat_2d is None:
-            for ds in datasets:
-                for da_check in ds.data_vars.values():
-                    da_ref = ds[list(ds.data_vars)[0]]
-                    if "latitude" in da_ref.coords:
-                        lat_2d = da_ref.coords["latitude"].values
-                        lon_2d = da_ref.coords["longitude"].values
-                    elif "lat" in da_ref.coords:
-                        lat_2d = da_ref.coords["lat"].values
-                        lon_2d = da_ref.coords["lon"].values
-                    break
-                if lat_2d is not None:
-                    break
+            # Relay worker log messages through the main-process logger
+            for level, msg in result["logs"]:
+                getattr(log, level)(msg)
 
-        # Extract each expected variable from the already-opened datasets
-        for var_name, var in expected.items():
-            # Variables with grib_accum_hours set (e.g. total_precipitation) have
-            # multiple tp messages in the same file (QPF01, QPF06, QPF12).  cfgrib
-            # picks whichever message appears first, which alternates between files
-            # and produces the spurious oscillation.  Open separately with an
-            # explicit stepRange filter to always get the 1-hour bucket.
-            if var.grib_accum_hours is not None:
-                da = _open_with_accum_filter(grib2_path, var, fxx)
-            else:
-                da = _find_variable_in_datasets(datasets, var)
-            if da is None:
-                log.debug(f"  {var_name}: not found in fxx={fxx:03d}")
+            if lat_2d is None and result["lat"] is not None:
+                lat_2d = result["lat"]
+                lon_2d = result["lon"]
+
+            for var_name, (vt, arr) in result["records"].items():
+                var_records[var_name].append((vt, arr))
+            for var_name in result["missing"]:
                 var_missing[var_name] += 1
-                continue
 
-            vt = _get_valid_time(da, var_name, fxx)
-            if vt is None:
-                var_missing[var_name] += 1
-                continue
-
-            converted = converters[var_name](da.values).astype(np.float32)
-            var_records[var_name].append((vt, converted))
+            if done % 10 == 0 or done == n_tasks:
+                elapsed = time.monotonic() - t0
+                log.info(f"  Extracted {done}/{n_tasks} files in {elapsed:.0f}s")
 
     # ---- Assemble per-variable DataArrays -----------------------------------
     data_vars: dict[str, xr.DataArray] = {}
@@ -431,34 +501,95 @@ def write_zarr(
 # Atomic swap
 # ---------------------------------------------------------------------------
 
-def atomic_swap(staging: Path, live: Path) -> None:
+def atomic_swap(staging: Path, zarr_dir: Path, cycle_tag: str) -> Path:
     """
-    Atomically replace the live Zarr store with the newly-written staging one.
+    Move the newly-written staging Zarr store to a named cycle store and
+    atomically update the ``current`` symlink to point to it.
 
-    Strategy: rename staging → live. If live already exists, rename it to a
-    backup first, then rename staging to live, then delete the backup.
-    This ensures the API never reads a partially-written store.
+    Named stores live at ``zarr_dir/{cycle_tag}/`` (e.g. ``zarr/20260301_16/``).
+    The ``current`` symlink is updated via an atomic rename so the API never
+    reads a partially-written or missing store.
+
+    Returns the path to the named cycle store.
     """
-    live.parent.mkdir(parents=True, exist_ok=True)
+    zarr_dir.mkdir(parents=True, exist_ok=True)
+    cycle_store = zarr_dir / cycle_tag
+    current_link = zarr_dir / "current"
 
-    backup = live.parent / f"{live.name}.backup"
+    # Remove any previous store for this cycle tag (re-run scenario)
+    if cycle_store.exists():
+        log.info(f"Removing previous store for cycle {cycle_tag}")
+        shutil.rmtree(cycle_store)
 
-    if live.exists():
-        log.info(f"Swapping: {staging.name} → {live.name} (backup: {backup.name})")
-        # Move current live → backup
-        if backup.exists():
-            shutil.rmtree(backup)
-        live.rename(backup)
-    else:
-        log.info(f"No existing live store; moving {staging.name} → {live.name}")
+    # Rename staging_new → cycle_tag (fast, same filesystem)
+    staging.rename(cycle_store)
+    log.info(f"Zarr store saved: {cycle_store}")
 
-    # Move staging → live
-    staging.rename(live)
+    # Atomically update the `current` symlink via a temporary link + os.replace()
+    tmp_link = zarr_dir / "current.new"
+    if tmp_link.exists() or tmp_link.is_symlink():
+        tmp_link.unlink()
+    os.symlink(cycle_tag, tmp_link)   # relative symlink within zarr_dir
+    os.replace(tmp_link, current_link)
+    log.info(f"Symlink updated: {current_link.name} → {cycle_tag}")
 
-    # Clean up backup
-    if backup.exists():
-        shutil.rmtree(backup)
-        log.info("Backup removed.")
+    return cycle_store
+
+
+# ---------------------------------------------------------------------------
+# Retention pruning
+# ---------------------------------------------------------------------------
+
+def prune_zarr_stores(
+    zarr_dir: Path,
+    current_tag: str,
+    keep_days: int = ZARR_RETAIN_DAYS,
+    keep_hours: tuple[int, ...] = ZARR_RETAIN_HOURS,
+) -> None:
+    """
+    Remove old named Zarr cycle stores, keeping:
+
+    - The current (latest) store, always.
+    - Stores from the past ``keep_days`` days whose cycle hour is in
+      ``keep_hours`` (default: 00Z, 06Z, 12Z, 18Z — the major NWP cycles).
+
+    Everything else is deleted.
+    """
+    from datetime import timedelta
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=keep_days)
+    reserved = {"current", "current.new", "staging_new", current_tag}
+
+    for store in sorted(zarr_dir.iterdir()):
+        if store.name in reserved or store.is_symlink() or not store.is_dir():
+            continue
+        try:
+            cycle_dt = datetime.strptime(store.name, "%Y%m%d_%H").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            continue  # not a cycle store directory
+
+        within_window = cycle_dt >= cutoff
+        major_cycle   = cycle_dt.hour in keep_hours
+
+        if within_window and major_cycle:
+            continue  # keep
+
+        log.info(f"Pruning Zarr store: {store.name}")
+        shutil.rmtree(store)
+
+
+def prune_staging_dirs(staging_root: Path, keep_tag: str) -> None:
+    """
+    Delete all GRIB2 staging directories except the most recently completed
+    cycle (``keep_tag``), which is retained for debugging.
+    """
+    if not staging_root.exists():
+        return
+    for d in sorted(staging_root.iterdir()):
+        if d.is_dir() and d.name != keep_tag:
+            log.info(f"Pruning old staging dir: {d.name}")
+            shutil.rmtree(d)
 
 
 # ---------------------------------------------------------------------------
@@ -480,9 +611,10 @@ def cleanup_staging(staging_dir: Path) -> None:
 
 def run_postprocessor(
     staging_dir: Path,
+    cycle_tag: Optional[str] = None,
     delete_staging: bool = True,
     zarr_staging: Optional[Path] = None,
-    zarr_live: Optional[Path] = None,
+    workers: int = POSTPROCESS_WORKERS,
 ) -> dict:
     """
     Run the full GRIB2 → Zarr post-processing pipeline:
@@ -490,29 +622,33 @@ def run_postprocessor(
     1. Load the variable registry
     2. Extract all native variables from staged GRIB2 files
     3. Write Zarr store with optimised chunking
-    4. Atomic swap to make it the live store
-    5. Delete staging GRIB2 files (unless delete_staging=False)
+    4. Atomic swap: rename to ``zarr/{cycle_tag}/`` and update ``current`` symlink
+    5. Prune old Zarr stores (keep 7 days of 00Z/06Z/12Z/18Z cycles)
+    6. Prune old GRIB2 staging dirs (keep most recent for debug)
 
     Parameters
     ----------
     staging_dir : Path
         Directory containing the staged GRIB2 files for one cycle.
+    cycle_tag : str, optional
+        Cycle identifier used to name the Zarr store (e.g. ``"20260301_16"``).
+        Derived from ``staging_dir.name`` if not provided.
     delete_staging : bool
-        If True (default), delete the GRIB2 staging directory after success.
+        If True (default), prune old GRIB2 staging directories, retaining
+        only the most recent cycle for debugging.  The just-completed cycle's
+        staging dir is always kept (it is the most recent).
     zarr_staging : Path, optional
-        Where to write the new Zarr store (default: ZARR_DIR / "staging_new").
-    zarr_live : Path, optional
-        Path to the live Zarr store (default: ZARR_DIR / "current").
+        Temporary write path (default: ``ZARR_DIR / "staging_new"``).
 
     Returns
     -------
     dict
         Processing statistics (timing, sizes, variable counts).
     """
+    if cycle_tag is None:
+        cycle_tag = staging_dir.name
     if zarr_staging is None:
         zarr_staging = ZARR_DIR / "staging_new"
-    if zarr_live is None:
-        zarr_live = ZARR_DIR / "current"
 
     overall_t0 = time.monotonic()
 
@@ -522,10 +658,10 @@ def run_postprocessor(
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
         cycle_str = manifest.get("cycle", cycle_str)
-    log.info(f"Post-processing cycle: {cycle_str}")
+    log.info(f"Post-processing cycle: {cycle_str}  (tag: {cycle_tag})")
     log.info(f"  Staging dir:  {staging_dir}")
-    log.info(f"  Zarr output:  {zarr_staging}")
-    log.info(f"  Zarr live:    {zarr_live}")
+    log.info(f"  Zarr staging: {zarr_staging}")
+    log.info(f"  Zarr store:   {ZARR_DIR / cycle_tag}")
 
     # --- Load variable registry ---
     registry = VariableRegistry(VARIABLES_YAML)
@@ -533,7 +669,7 @@ def run_postprocessor(
 
     # --- Extract variables ---
     extract_t0 = time.monotonic()
-    ds = extract_variables(staging_dir, registry)
+    ds = extract_variables(staging_dir, registry, workers=workers)
     extract_time = time.monotonic() - extract_t0
     log.info(f"Extraction complete in {extract_time:.1f}s")
 
@@ -541,21 +677,25 @@ def run_postprocessor(
     ds.attrs["cycle"] = cycle_str
     ds.attrs["created"] = datetime.now(tz=timezone.utc).isoformat()
 
-    # --- Write Zarr ---
+    # --- Write Zarr to staging location ---
     zarr_stats = write_zarr(ds, zarr_staging)
 
-    # --- Atomic swap ---
-    atomic_swap(zarr_staging, zarr_live)
-    log.info(f"Live Zarr store updated: {zarr_live}")
+    # --- Atomic swap: staging_new → cycle_tag, update current symlink ---
+    atomic_swap(zarr_staging, ZARR_DIR, cycle_tag)
+    log.info(f"Live store updated: {ZARR_DIR / 'current'} → {cycle_tag}")
 
-    # --- Cleanup ---
+    # --- Prune old Zarr stores ---
+    prune_zarr_stores(ZARR_DIR, current_tag=cycle_tag)
+
+    # --- Prune old GRIB2 staging directories (keep current cycle for debug) ---
     if delete_staging:
-        cleanup_staging(staging_dir)
+        prune_staging_dirs(staging_dir.parent, keep_tag=cycle_tag)
 
     overall_time = time.monotonic() - overall_t0
 
     stats = {
         "cycle": cycle_str,
+        "cycle_tag": cycle_tag,
         "extraction_time_s": round(extract_time, 1),
         **zarr_stats,
         "total_time_s": round(overall_time, 1),

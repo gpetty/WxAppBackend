@@ -19,7 +19,7 @@ import logging
 import sys
 from pathlib import Path
 
-from ..config import ZARR_DIR
+from ..config import ZARR_DIR, POSTPROCESS_WORKERS
 from .grib2_to_zarr import run_postprocessor
 
 
@@ -51,11 +51,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--zarr-out", type=Path, default=None, metavar="DIR",
-        help=f"Zarr staging output path (default: {ZARR_DIR / 'staging_new'}).",
+        help=f"Temporary Zarr write path (default: {ZARR_DIR / 'staging_new'}). "
+             f"After writing, the store is renamed to zarr/{{cycle_tag}}/ and "
+             f"the 'current' symlink is updated.",
     )
     parser.add_argument(
-        "--zarr-live", type=Path, default=None, metavar="DIR",
-        help=f"Zarr live store path (default: {ZARR_DIR / 'current'}).",
+        "--workers", type=int, default=POSTPROCESS_WORKERS, metavar="N",
+        help=f"Number of parallel worker processes for cfgrib extraction "
+             f"(default: {POSTPROCESS_WORKERS}, override with POSTPROCESS_WORKERS env var).",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
@@ -75,7 +78,7 @@ def main() -> None:
             staging_dir=args.staging_dir,
             delete_staging=not args.keep_staging,
             zarr_staging=args.zarr_out,
-            zarr_live=args.zarr_live,
+            workers=args.workers,
         )
         # Print stats as JSON for easy machine consumption
         print(json.dumps(stats, indent=2))

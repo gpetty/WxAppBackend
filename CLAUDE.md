@@ -97,8 +97,8 @@ These are non-obvious findings from empirical testing — read before writing an
 ### Extended-range files are S3-only
 Files f037+ do not exist on NOMADS — only on S3. Herbie's default `priority` tries NOMADS first and fails. All Herbie calls in the ingestion pipeline use `priority=["aws", "nomads"]` to force S3-first lookup.
 
-### fxx schedule: starts at f037, not f039
-The 3-hourly segment begins at f037 (not f039 as one might assume). The 6-hourly segment begins at f196 (not f193). The cycle ends at f262 (not f264). See `nbm_forecast_hours()` in `ingest.py` for the authoritative implementation.
+### fxx schedule: starts at f038, not f037
+The 3-hourly segment begins at f038 (not f037 or f039). The 6-hourly segment begins at f194 (not f196). The cycle ends at f260 (not f262). Total: 99 files per cycle (36 + 51 + 12). See `nbm_forecast_hours()` in `ingest.py` for the authoritative implementation. (Note: earlier documentation incorrectly stated f037/f196/f262 — corrected 2026-03-01 by direct S3 listing of the 16Z cycle.)
 
 ### Variable availability differs by fxx segment
 The 6-hourly segment (f196–f262) has fewer variables than the hourly/3-hourly segments. Verified differences:

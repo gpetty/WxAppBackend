@@ -61,8 +61,8 @@ def main() -> None:
         description="Download the latest NBM CONUS forecast cycle.",
     )
     parser.add_argument(
-        "--fxx-max", type=int, default=264, metavar="N",
-        help="Download forecast hours 1 through N (default: 264 = full cycle). "
+        "--fxx-max", type=int, default=260, metavar="N",
+        help="Download forecast hours 1 through N (default: 260 = full cycle). "
              "Use 36 for a fast ~900 MB test run.",
     )
     parser.add_argument(
@@ -88,6 +88,15 @@ def main() -> None:
              "Zarr conversion (useful for debugging).",
     )
     parser.add_argument(
+        "--max-retries", type=int, default=5, metavar="N",
+        help="Retry failed files up to N times (default: 5). "
+             "Each retry waits --retry-delay seconds.",
+    )
+    parser.add_argument(
+        "--retry-delay", type=int, default=300, metavar="SEC",
+        help="Seconds to wait between retry attempts (default: 300 = 5 min).",
+    )
+    parser.add_argument(
         "--status", action="store_true",
         help="Show current staging directory state and exit.",
     )
@@ -107,7 +116,8 @@ def main() -> None:
     log.info(f"Data root: {DATA_ROOT}")
     log.info(f"fxx_max={args.fxx_max}  workers={args.workers}  "
              f"dry_run={args.dry_run}  force={args.force}  "
-             f"postprocess={args.postprocess}")
+             f"postprocess={args.postprocess}  "
+             f"max_retries={args.max_retries}  retry_delay={args.retry_delay}s")
 
     try:
         staging_dir = run_ingestion(
@@ -117,6 +127,8 @@ def main() -> None:
             force=args.force,
             postprocess=args.postprocess,
             keep_staging=args.keep_staging,
+            max_retries=args.max_retries,
+            retry_delay=args.retry_delay,
         )
         log.info(f"Done. Files staged at: {staging_dir}")
 

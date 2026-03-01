@@ -76,7 +76,6 @@ _DECIMAL_PLACES: dict[str, int] = {
     "wind_gust":                1,
     "wind_direction":           0,
     "total_precipitation":      2,
-    "precip_probability":       0,
     "precip_type":              0,
     "thunderstorm_probability": 0,
     "cape":                     0,

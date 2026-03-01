@@ -1,0 +1,11 @@
+# /etc/systemd/system/wxingest.timer
+[Unit]
+Description=Weather Window NBM Ingestion — hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

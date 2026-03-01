@@ -35,8 +35,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
-from .config import ZARR_DIR, VARIABLES_YAML
+from .config import ZARR_DIR, VARIABLES_YAML, REPO_ROOT
 from .registry import VariableRegistry
 from .extraction import open_zarr_store
 from .routers import forecast, variables, status
@@ -164,6 +165,18 @@ def admin_reload(request: Request):
     except Exception as exc:
         log.exception("Reload failed")
         raise HTTPException(status_code=500, detail=f"Reload failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Developer tools
+# ---------------------------------------------------------------------------
+
+_REVIEW_HTML = REPO_ROOT / "forecast_review.html"
+
+@app.get("/review", include_in_schema=False)
+def review_page():
+    """Serve the forecast review tool (single-page HTML + Chart.js)."""
+    return FileResponse(_REVIEW_HTML, media_type="text/html")
 
 
 # ---------------------------------------------------------------------------

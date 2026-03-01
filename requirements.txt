@@ -3,6 +3,8 @@
 
 # --- Data ingestion & GRIB2 ---
 herbie-data          # NOAA model data access (NBM, GFS, etc.)
+s3fs                 # S3 filesystem interface (required for Herbie AWS source)
+boto3                # AWS SDK (s3fs dependency; needed for anonymous public bucket access)
 cfgrib               # GRIB2 → xarray via eccodes
 xarray               # N-dimensional array library (core data structure)
 zarr                 # Chunked array storage (post-processed forecast store)
@@ -12,6 +14,7 @@ pandas               # DataFrame-based time series (query layer)
 # --- API ---
 fastapi              # REST API framework
 uvicorn[standard]    # ASGI server for FastAPI
+gunicorn
 pydantic             # Request/response validation (used by FastAPI)
 
 # --- Derived variable computation ---
