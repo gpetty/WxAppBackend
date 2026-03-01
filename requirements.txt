@@ -1,0 +1,22 @@
+# Weather Window Web App — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# --- Data ingestion & GRIB2 ---
+herbie-data          # NOAA model data access (NBM, GFS, etc.)
+cfgrib               # GRIB2 → xarray via eccodes
+xarray               # N-dimensional array library (core data structure)
+zarr                 # Chunked array storage (post-processed forecast store)
+numpy                # Numerical arrays
+pandas               # DataFrame-based time series (query layer)
+
+# --- API ---
+fastapi              # REST API framework
+uvicorn[standard]    # ASGI server for FastAPI
+pydantic             # Request/response validation (used by FastAPI)
+
+# --- Derived variable computation ---
+pysolar              # Solar elevation angle from lat/lon + datetime
+
+# --- Development & testing ---
+httpx                # Async HTTP client (for FastAPI test client)
+pytest               # Test runner

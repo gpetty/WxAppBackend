@@ -1,0 +1,225 @@
+# Weather Window variable registry
+#
+# Each native variable maps a human-readable name to its cfgrib identifiers.
+# The post-processor uses this file to decide what to extract from GRIB2.
+# The API uses it to validate requests and annotate responses.
+#
+# Verified against: blend.t18z.core.f001.co.grib2  (hourly segment)
+#                   blend.t18z.core.f037.co.grib2  (3-hourly segment)
+#                   blend.t18z.core.f196.co.grib2  (6-hourly segment)
+#   cfgrib var_key  = the xarray variable name assigned by cfgrib
+#   grib_shortName  = GRIB2 shortName as reported by cfgrib (may differ from WMO standard)
+#   grib_typeOfLevel = GRIB2 typeOfLevel string; "?" means cfgrib can't parse it
+#
+# NOTE on level values: NBM uses non-standard level encoding; cfgrib reports level=?
+# for most fields. Filter by shortName + typeOfLevel only (not level value).
+#
+# NOTE on fxx segments and file sizes:
+#   f001–f036 (~150 MB each): hourly, NOMADS + S3
+#   f037–f190 (~150 MB each): 3-hourly, S3 only — same variable set as f001–f036
+#   f196–f262 (~75 MB each):  6-hourly, S3 only — reduced variable set (see below)
+#
+# Variables absent from the 6-hourly segment (f196+):
+#   thunderstorm_probability (tstm) — use fxx_cutoff: 190
+#   visibility               (vis)  — use fxx_cutoff: 190
+#
+# Variables absent from ALL standard forecast-hour files (extract from accumulation steps):
+#   precip_probability (pop12) — present only at fxx=006,012,018,...
+#
+# Variables present ONLY in the 6-hourly segment (f196+) — candidates for future addition:
+#   hindex  (shortName: hindex, typeOfLevel: heightAboveGround) — native NBM heat index
+#   tmax    (shortName: tmax,   typeOfLevel: heightAboveGround) — daily maximum temperature
+#   sf      (shortName: sf,     typeOfLevel: surface)           — snowfall water equivalent
+
+variables:
+
+  # ---------------------------------------------------------------------------
+  # Near-surface temperature & humidity
+  # ---------------------------------------------------------------------------
+
+  temperature:
+    cfgrib_var_key:   t2m
+    grib_shortName:   "2t"
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        K
+    units_out:        F
+    description:      "2-metre air temperature"
+
+  dewpoint:
+    cfgrib_var_key:   d2m
+    grib_shortName:   "2d"
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        K
+    units_out:        F
+    description:      "2-metre dewpoint temperature"
+
+  relative_humidity:
+    cfgrib_var_key:   r2
+    grib_shortName:   "2r"
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        "%"
+    units_out:        "%"
+    description:      "2-metre relative humidity"
+
+  apparent_temperature:
+    cfgrib_var_key:   aptmp
+    grib_shortName:   aptmp
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        K
+    units_out:        F
+    description:      "Apparent temperature (NBM blended feels-like; encompasses heat index / wind chill)"
+
+  # ---------------------------------------------------------------------------
+  # Wind (10 m)
+  # ---------------------------------------------------------------------------
+
+  wind_speed:
+    cfgrib_var_key:   si10
+    grib_shortName:   "10si"
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        "m s**-1"
+    units_out:        mph
+    description:      "10-metre wind speed"
+
+  wind_direction:
+    cfgrib_var_key:   wdir10
+    grib_shortName:   "10wdir"
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        "Degree true"
+    units_out:        "Degree true"
+    description:      "10-metre wind direction (meteorological, degrees from north)"
+
+  wind_gust:
+    cfgrib_var_key:   i10fg
+    grib_shortName:   i10fg
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        "m s**-1"
+    units_out:        mph
+    description:      "Instantaneous 10-metre wind gust"
+
+  # ---------------------------------------------------------------------------
+  # Precipitation & convection
+  # ---------------------------------------------------------------------------
+
+  total_precipitation:
+    cfgrib_var_key:   tp
+    grib_shortName:   tp
+    grib_typeOfLevel: surface
+    units_raw:        "kg m**-2"
+    units_out:        "mm"                  # kg m**-2 = mm liquid-equivalent (density of water = 1000 kg/m³)
+    description:      "Total precipitation (liquid-equivalent accumulation)"
+    grib_accum_hours: 1                     # 3-hourly/6-hourly files also contain QPF06 and QPF12 messages
+                                            # with the same shortName (tp). Force stepRange={fxx-1}-{fxx}
+                                            # to always extract the 1-hour accumulation (QPF01).
+
+  precip_probability:
+    cfgrib_var_key:   pop12
+    grib_shortName:   pop12
+    grib_typeOfLevel: surface
+    units_raw:        "%"
+    units_out:        "%"
+    description:      "12-hour probability of precipitation"
+    # pop12 is NOT present in standard hourly/3-hourly/6-hourly forecast files.
+    # It appears only at 6-hourly accumulation-boundary steps (fxx=006,012,018,...,264).
+    # Verified absent from f001, f037, f196 in the standard core product.
+    # The post-processor must extract this field from a separate targeted fxx list.
+    fxx_availability: [6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78, 84, 90, 96,
+                       102, 108, 114, 120, 126, 132, 138, 144, 150, 156, 162, 168,
+                       174, 180, 186, 192, 198, 204, 210, 216, 222, 228, 234, 240,
+                       246, 252, 258, 264]   # 6-hourly steps throughout full cycle; verify
+
+  precip_type:
+    cfgrib_var_key:   ptype
+    grib_shortName:   ptype
+    grib_typeOfLevel: surface
+    units_raw:        "(Code table 4.201)"
+    units_out:        "(Code table 4.201)"  # 1=rain, 3=freezing rain, 5=snow, 8=sleet; see GRIB2 table
+    description:      "Precipitation type (GRIB2 code table 4.201)"
+
+  thunderstorm_probability:
+    cfgrib_var_key:   tstm
+    grib_shortName:   tstm
+    grib_typeOfLevel: surface
+    units_raw:        "%"
+    units_out:        "%"
+    description:      "Thunderstorm probability"
+    # Verified behavior (2026-02-28):
+    #   f001–f082: present at every hourly/3-hourly step
+    #   f085–f190: present only at every-6-hour boundaries (f088, f094, f100, ..., f190)
+    #              missing at the intervening 3-hourly steps (f085, f091, f097, ...)
+    #   f196+:     absent entirely
+    # The post-processor handles the alternating presence gracefully (extracts what's
+    # there, skips what's absent). fxx_cutoff=190 tells the extractor not to attempt f196+.
+    fxx_cutoff:       190
+
+  cape:
+    cfgrib_var_key:   cape
+    grib_shortName:   cape
+    grib_typeOfLevel: surface
+    units_raw:        "J kg**-1"
+    units_out:        "J kg**-1"
+    description:      "Convective available potential energy"
+
+  # ---------------------------------------------------------------------------
+  # Cloud & radiation
+  # ---------------------------------------------------------------------------
+
+  cloud_cover:
+    cfgrib_var_key:   tcc
+    grib_shortName:   tcc
+    grib_typeOfLevel: surface             # 'surface' tcc is all-layer total; avoid highCloudLayer duplicate
+    units_raw:        "%"
+    units_out:        "%"
+    description:      "Total cloud cover (all layers)"
+
+  solar_radiation:
+    cfgrib_var_key:   sdswrf
+    grib_shortName:   sdswrf
+    grib_typeOfLevel: surface
+    units_raw:        "W m**-2"
+    units_out:        "W m**-2"
+    description:      "Surface downward short-wave radiation flux"
+
+  # ---------------------------------------------------------------------------
+  # Visibility
+  # ---------------------------------------------------------------------------
+
+  visibility:
+    cfgrib_var_key:   vis
+    grib_shortName:   vis
+    grib_typeOfLevel: surface
+    units_raw:        m
+    units_out:        miles
+    description:      "Horizontal visibility at surface"
+    # Verified behavior (2026-02-28):
+    #   f001–f076: present (hourly + first ~13 steps of 3-hourly segment)
+    #   f079+:     absent
+    # Hard cutoff at f076; this is a modeling limitation, not a data gap.
+    fxx_cutoff:       76
+
+  cloud_ceiling:
+    cfgrib_var_key:   ceil
+    grib_shortName:   ceil
+    grib_typeOfLevel: cloudCeiling
+    units_raw:        m
+    units_out:        feet
+    description:      "Cloud ceiling height (base of lowest cloud layer)"
+    # Verified behavior (2026-02-28):
+    #   f001–f082: present (hourly + first ~16 steps of 3-hourly segment)
+    #   f085+:     absent
+    fxx_cutoff:       82
+
+  # ---------------------------------------------------------------------------
+  # Derived variables (computed at query time; not stored in Zarr)
+  # ---------------------------------------------------------------------------
+  #
+  # NOTE: heat_index and wind_chill are intentionally omitted.
+  # apparent_temperature (native NBM, above) is a pre-blended feels-like field
+  # that covers both roles with better calibration than hand-computed formulas.
+
+  sun_elevation:
+    derived:          true
+    requires:         [lat, lon, valid_time]
+    formula:          pysolar
+    units_out:        degrees
+    description:      "Solar elevation angle above horizon (astronomical, no atmospheric correction)"
