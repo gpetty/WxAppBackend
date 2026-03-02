@@ -1,0 +1,11 @@
+[Unit]
+Description=Weather Window backend health monitor
+After=network.target
+
+[Service]
+Type=oneshot
+User=gpetty
+WorkingDirectory=/home/gpetty/WxApp
+ExecStart=/home/gpetty/WxApp/.venv/bin/python scripts/wxmonitor.py
+StandardOutput=journal
+StandardError=journal

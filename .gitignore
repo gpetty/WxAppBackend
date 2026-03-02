@@ -12,6 +12,9 @@ env/
 # Data (large GRIB2 and Zarr files — never commit)
 data/
 
+# Gunicorn runtime socket (created in WorkingDirectory by gunicorn master process)
+gunicorn.ctl
+
 # Scratch / temp files
 t
 t~
