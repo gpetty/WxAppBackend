@@ -22,7 +22,7 @@ def _log(msg: str) -> None:
 HC_UUID    = "1ffbadd7-5c6b-4217-a709-b272eec6476f"   # <-- only line to edit
 HC_BASE    = f"https://hc-ping.com/{HC_UUID}"
 STATUS_URL = "http://127.0.0.1:8001/status"
-MAX_AGE_H  = 3                           # alert if cycle older than this
+MAX_AGE_H  = 3.5                         # alert if cycle older than this
 
 
 def _ping(path: str = "", message: str = "") -> None:
