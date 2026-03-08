@@ -105,6 +105,59 @@ def list_available_fxx(
 
 
 # ---------------------------------------------------------------------------
+# Valid-time thinning
+# ---------------------------------------------------------------------------
+
+# Lead-time cutoffs (forecast hours) for thinning the extended range.
+HOURLY_CUTOFF   = 36    # fxx ≤ this: keep every step (~1.5 days)
+THREE_HR_CUTOFF = 192   # this < fxx ≤ this: 3-hourly valid times (~8 days)
+                        # fxx > THREE_HR_CUTOFF: 6-hourly valid times (~11 days)
+
+
+def thin_fxx(cycle_time: datetime, fxx_list: list[int]) -> list[int]:
+    """
+    Filter *fxx_list* to a practical subset aligned to standard UTC valid times.
+
+    NBM now publishes hourly files for the full ~11-day horizon (~264 files).
+    Downloading all of them takes ~60 min per cycle.  Thinning to 3-hourly
+    and 6-hourly valid times beyond the short range reduces the target to
+    ~100 files while preserving standard UTC alignment (00/03/06/… UTC).
+
+    Adaptive behaviour:
+        The UTC-boundary filter is only applied when NBM is publishing files
+        *denser* than the target step for that zone (e.g. hourly instead of
+        3-hourly).  If NBM reverts to sparser files (native step ≥ target),
+        all available files in the zone are retained as-is.  This ensures
+        graceful degradation if NOAA reduces hourly coverage in future cycles.
+
+    Zone cutoffs:
+        fxx ≤ 36         all steps retained (hourly, ~1.5 days)
+        37 ≤ fxx ≤ 192   target 3-hourly valid UTC times (~8 days)
+        fxx > 192        target 6-hourly valid UTC times (~11 days)
+    """
+    def _thin_zone(zone: list[int], target_step: int) -> list[int]:
+        if not zone:
+            return []
+        # Detect native step size from the smallest gap between consecutive fxx.
+        native_step = min(
+            (zone[i + 1] - zone[i] for i in range(len(zone) - 1)),
+            default=target_step,
+        )
+        if native_step >= target_step:
+            # Already as sparse as (or sparser than) our target — keep everything.
+            return zone
+        # Denser than target: keep only steps whose valid UTC hour is a
+        # multiple of target_step.
+        return [f for f in zone if (cycle_time.hour + f) % target_step == 0]
+
+    hourly = [f for f in fxx_list if f <= HOURLY_CUTOFF]
+    mid    = [f for f in fxx_list if HOURLY_CUTOFF < f <= THREE_HR_CUTOFF]
+    long_  = [f for f in fxx_list if f > THREE_HR_CUTOFF]
+
+    return hourly + _thin_zone(mid, 3) + _thin_zone(long_, 6)
+
+
+# ---------------------------------------------------------------------------
 # Cycle discovery
 # ---------------------------------------------------------------------------
 
@@ -304,12 +357,12 @@ def download_cycle(
 
     Returns a dict mapping fxx → local file path for every successful download.
     """
-    # Static schedule used only as the "target" set for completion check.
-    expected = set(nbm_forecast_hours(fxx_max))
+    # Target set: S3 schedule thinned to standard valid-time boundaries.
+    expected = set(thin_fxx(cycle_time, list(range(1, fxx_max + 1))))
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     log.info(f"Cycle: {cycle_time:%Y-%m-%d %H}Z | "
-             f"target {len(expected)} forecast hours up to fxx {fxx_max:03d} | "
+             f"target {len(expected)} thinned forecast hours (fxx ≤ {fxx_max:03d}) | "
              f"{workers} workers")
 
     if dry_run:
@@ -328,15 +381,15 @@ def download_cycle(
             )
             time.sleep(retry_delay)
 
-        # Fresh S3 listing — discovers files posted since the previous pass.
-        available = list_available_fxx(cycle_time, fxx_max=fxx_max)
+        # Fresh S3 listing thinned to standard valid-time boundaries.
+        available_raw = list_available_fxx(cycle_time, fxx_max=fxx_max)
+        available = thin_fxx(cycle_time, available_raw)
         to_download = [f for f in available if f not in results]
 
         log.info(
             f"Pass {attempt + 1}/{max_retries + 1}: "
-            f"{len(available)} on S3  |  "
-            f"{len(results)} downloaded  |  "
-            f"{len(to_download)} to fetch"
+            f"{len(available_raw)} on S3  |  {len(available)} after thinning  |  "
+            f"{len(results)} downloaded  |  {len(to_download)} to fetch"
         )
 
         if to_download:
