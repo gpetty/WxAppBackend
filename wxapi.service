@@ -20,6 +20,7 @@ StartLimitBurst=5
 MemoryHigh=70G
 MemoryMax=85G
 MemorySwapMax=0
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
