@@ -104,6 +104,39 @@ def _should_extract(var: NativeVariable, fxx: int) -> bool:
     return True
 
 
+def _scan_shortnames(grib2_path: Path) -> Optional[frozenset[str]]:
+    """
+    Quick eccodes scan: enumerate the shortName of every GRIB2 message in the file.
+
+    Costs ~1–5 ms for a typical NBM file (reads message headers only, no data).
+    Returns a frozenset of shortName strings, or None if eccodes is unavailable
+    or the file can't be read (caller falls back to full cfgrib open).
+
+    Used to pre-screen GRIB2 files before calling cfgrib so that filler files
+    (containing only a single 'tp' message) are detected immediately and skipped
+    for the 11 variables that aren't present — avoiding 11 failed cfgrib opens.
+    """
+    try:
+        import eccodes
+        names: set[str] = set()
+        with open(grib2_path, "rb") as fh:
+            while True:
+                msg = eccodes.codes_grib_new_from_file(fh)
+                if msg is None:
+                    break
+                try:
+                    try:
+                        sn = eccodes.codes_get(msg, "shortName")
+                    except eccodes.KeyValueNotFoundError:
+                        sn = "~"
+                    names.add(sn)
+                finally:
+                    eccodes.codes_release(msg)
+        return frozenset(names)
+    except Exception:
+        return None
+
+
 def _open_all_datasets(grib2_path: Path) -> Optional[list]:
     """
     Open a GRIB2 file with cfgrib and return the list of xarray Datasets.
@@ -231,27 +264,63 @@ def _extract_file_worker(
     missing: list[str] = []
     lat_2d = lon_2d = None
 
-    datasets = _open_all_datasets(grib2_path)
-    if datasets is None:
-        logs.append(("warning", f"fxx={fxx:03d}: cfgrib failed to open {grib2_path.name}"))
+    # --- Fast pre-screen: detect which shortNames are present (ms, not seconds) ---
+    present = _scan_shortnames(grib2_path)
+    if present is not None:
+        effective_vars = {
+            name: var for name, var in expected_vars.items()
+            if var.grib_shortName in present
+        }
+        absent = set(expected_vars) - set(effective_vars)
+        if absent:
+            missing.extend(absent)
+            logs.append(("debug",
+                f"fxx={fxx:03d}: pre-screen: {len(absent)} vars absent "
+                f"(file has {len(present)} shortNames, {len(effective_vars)} to extract)"
+            ))
+    else:
+        # eccodes unavailable or scan failed — fall back to full extraction attempt
+        effective_vars = expected_vars
+
+    if not effective_vars:
+        logs.append(("info",
+            f"[{fxx:03d}] {grib2_path.name}: "
+            f"0 extracted, {len(missing)} missing (all pre-screened)"
+        ))
         return {"fxx": fxx, "records": {}, "lat": None, "lon": None,
-                "missing": list(expected_vars), "logs": logs}
+                "missing": missing, "logs": logs}
 
-    # Capture lat/lon from first dataset that has spatial coordinates
-    for ds in datasets:
-        if not ds.data_vars:
-            continue
-        da_ref = ds[list(ds.data_vars)[0]]
-        if "latitude" in da_ref.coords:
-            lat_2d = da_ref.coords["latitude"].values
-            lon_2d = da_ref.coords["longitude"].values
-        elif "lat" in da_ref.coords:
-            lat_2d = da_ref.coords["lat"].values
-            lon_2d = da_ref.coords["lon"].values
-        if lat_2d is not None:
-            break
+    # --- Only call cfgrib.open_datasets() if we have non-accum vars to extract ---
+    # Filler files (single 'tp' message) only have accum vars; skipping
+    # open_datasets() for them saves ~6 s per file.
+    needs_datasets = any(v.grib_accum_hours is None for v in effective_vars.values())
+    datasets: Optional[list] = None
 
-    for var_name, var in expected_vars.items():
+    if needs_datasets:
+        datasets = _open_all_datasets(grib2_path)
+        if datasets is None:
+            logs.append(("warning", f"fxx={fxx:03d}: cfgrib failed to open {grib2_path.name}"))
+            # Non-accum vars can't be extracted; accum vars use their own open below.
+            accum_only = {n: v for n, v in effective_vars.items() if v.grib_accum_hours is not None}
+            for name in set(effective_vars) - set(accum_only):
+                missing.append(name)
+            effective_vars = accum_only
+        else:
+            # Capture lat/lon from first dataset that has spatial coordinates
+            for ds in datasets:
+                if not ds.data_vars:
+                    continue
+                da_ref = ds[list(ds.data_vars)[0]]
+                if "latitude" in da_ref.coords:
+                    lat_2d = da_ref.coords["latitude"].values
+                    lon_2d = da_ref.coords["longitude"].values
+                elif "lat" in da_ref.coords:
+                    lat_2d = da_ref.coords["lat"].values
+                    lon_2d = da_ref.coords["lon"].values
+                if lat_2d is not None:
+                    break
+
+    for var_name, var in effective_vars.items():
         if var.grib_accum_hours is not None:
             da = _open_with_accum_filter(grib2_path, var, fxx)
         else:
