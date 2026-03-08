@@ -20,11 +20,12 @@ full mapping and discover which names are valid.
 
 Query parameters
 ----------------
-lat   float   Latitude, decimal degrees (-90 – 90)
-lon   float   Longitude, decimal degrees (±180 or 0–360)
-vars  str     Comma-separated plain variable names
-start str     Optional ISO-8601 UTC datetime
-end   str     Optional ISO-8601 UTC datetime
+lat       float   Latitude, decimal degrees (-90 – 90)
+lon       float   Longitude, decimal degrees (±180 or 0–360)
+vars      str     Comma-separated plain variable names
+start     str     Optional ISO-8601 UTC datetime
+end       str     Optional ISO-8601 UTC datetime
+age_hours int     Return cycle at least this many hours older than current (0 = current)
 """
 
 from __future__ import annotations
@@ -46,9 +47,6 @@ router = APIRouter()
 
 # ---------------------------------------------------------------------------
 # Unit suffix table
-# Maps units_out values (from variables.yaml) → response key suffix.
-# Suffix is appended as  f"{var_name}_{suffix}"  to form the response key.
-# Empty string → no suffix (e.g. categorical codes where the name is enough).
 # ---------------------------------------------------------------------------
 
 _UNIT_SUFFIX: dict[str, str] = {
@@ -63,11 +61,9 @@ _UNIT_SUFFIX: dict[str, str] = {
     "J kg**-1":            "Jkg",
     "W m**-2":             "Wm2",
     "(Code table 4.201)":  "code",
-    "kg m**-2":            "mm",   # fallback if any old store still carries this label
+    "kg m**-2":            "mm",
 }
 
-# Decimal places to round each variable's values before serialisation.
-# Meteorological precision: more than this is noise in float32 NBM data.
 _DECIMAL_PLACES: dict[str, int] = {
     "temperature":              1,
     "dewpoint":                 1,
@@ -94,14 +90,12 @@ _DEFAULT_DECIMALS = 1
 # ---------------------------------------------------------------------------
 
 def _response_key(var_name: str, units_out: str) -> str:
-    """Build the response key from a plain variable name and its output units."""
     suffix = _UNIT_SUFFIX.get(units_out, "")
     return f"{var_name}_{suffix}" if suffix else var_name
 
 
 def _round_val(val: float, decimals: int) -> Optional[float]:
-    """Round a single value; return None for NaN (serialises to JSON null)."""
-    if val is None or (isinstance(val, float) and math.isnan(val)):
+    if val is None or (isinstance(val, float) and (math.isnan(val) or math.isinf(val))):
         return None
     return round(float(val), decimals)
 
@@ -118,52 +112,66 @@ def _parse_timestamp(value: str, param: str) -> pd.Timestamp:
         )
 
 
-def _normalise_runtime(raw: str) -> str:
-    """Return a clean UTC ISO-8601 string with Z suffix."""
+def _normalise_runtime(raw: Optional[str]) -> Optional[str]:
+    """Return a clean UTC ISO-8601 string with Z suffix, or None."""
+    if not raw:
+        return None
     try:
         ts = pd.Timestamp(raw)
         ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
         return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
-        return raw   # return as-is if unparseable
+        return raw
 
 
 # ---------------------------------------------------------------------------
-# Store selection
+# Cycle selection
 # ---------------------------------------------------------------------------
 
-def _select_store(state, age_hours: int):
+def _select_cycle_tag(state, age_hours: int) -> Optional[str]:
     """
-    Return the xr.Dataset for the most-recent cycle that is at least
-    ``age_hours`` older than the current cycle.
+    Return the cycle_tag for the most-recent run at least ``age_hours`` older
+    than the current run.  age_hours=0 returns None (meaning "current run").
 
-    age_hours=0 → current cycle (fast path, no tag parsing).
+    Raises HTTP 404 if no qualifying run is found.
     """
     if age_hours == 0:
-        return state.ds
+        return None
 
-    current_dt = datetime.strptime(state.current_tag, "%Y%m%d_%H")
-    target_dt  = current_dt - timedelta(hours=age_hours)
+    store = state.store
+    current_tag = store.current_cycle_tag
+    current_dt  = datetime.strptime(current_tag, "%Y%m%d_%H")
+    target_dt   = current_dt - timedelta(hours=age_hours)
 
     candidates = [
-        (tag, datetime.strptime(tag, "%Y%m%d_%H"))
-        for tag in state.stores
-        if datetime.strptime(tag, "%Y%m%d_%H") <= target_dt
+        (r["cycle_tag"], datetime.strptime(r["cycle_tag"], "%Y%m%d_%H"))
+        for r in store.available_runs
+        if datetime.strptime(r["cycle_tag"], "%Y%m%d_%H") <= target_dt
     ]
 
     if not candidates:
         raise HTTPException(
             status_code=404,
             detail={
-                "message":          f"No cycle available ≥ {age_hours}h before current.",
-                "current_cycle":    state.current_tag,
+                "message":             f"No cycle available ≥ {age_hours}h before current.",
+                "current_cycle":       current_tag,
                 "requested_age_hours": age_hours,
-                "available_cycles": sorted(state.stores.keys()),
+                "available_cycles":    sorted(r["cycle_tag"] for r in store.available_runs),
             },
         )
 
-    best_tag = max(candidates, key=lambda x: x[1])[0]
-    return state.stores[best_tag]
+    return max(candidates, key=lambda x: x[1])[0]
+
+
+def _cycle_time_for_tag(state, cycle_tag: Optional[str]) -> Optional[str]:
+    """Look up the ISO-8601 cycle_time for a given tag (or current if None)."""
+    store = state.store
+    if cycle_tag is None:
+        return store.current_cycle_time
+    for run in store.available_runs:
+        if run["cycle_tag"] == cycle_tag:
+            return run["cycle_time"]
+    return cycle_tag
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +180,7 @@ def _select_store(state, age_hours: int):
 
 @router.get("/forecast")
 def get_forecast(
-    request: Request,
+    request:   Request,
     lat:       float         = Query(..., ge=-90.0,  le=90.0,
                                      description="Latitude (decimal degrees)"),
     lon:       float         = Query(..., ge=-180.0, le=360.0,
@@ -191,11 +199,9 @@ def get_forecast(
 
     Every array in the response has the same length (`length`).  Variable
     keys carry their units as a suffix so the response is self-documenting
-    without a separate units lookup.  Absent values (e.g. visibility beyond
-    its forecast horizon) are JSON `null`.
+    without a separate units lookup.  Absent values are JSON `null`.
     """
     state    = request.app.state
-    ds       = _select_store(state, age_hours)
     registry = state.registry
 
     # Normalise lon to ±180
@@ -221,25 +227,36 @@ def get_forecast(
     if start_ts and end_ts and start_ts >= end_ts:
         raise HTTPException(status_code=422, detail="'start' must be before 'end'.")
 
+    # Select cycle
+    cycle_tag  = _select_cycle_tag(state, age_hours)
+    cycle_time = _cycle_time_for_tag(state, cycle_tag)
+
     # Query
     try:
         df, actual_lat, actual_lon = query_forecast(
-            ds=ds, lat=lat, lon=lon,
-            variables=requested, registry=registry,
+            store=state.store,
+            lat_grid=state.lat_grid,
+            lon_grid=state.lon_grid,
+            lat=lat, lon=lon,
+            variables=requested,
+            registry=registry,
             start=start_ts, end=end_ts,
+            cycle_tag=cycle_tag,
         )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         log.exception("Unexpected error in query_forecast")
         raise HTTPException(status_code=500, detail=f"Internal error: {exc}")
 
-    # Build shared time axis (UTC, Z suffix, 20 chars each)
+    # Build shared time axis
     times = [ts.strftime("%Y-%m-%dT%H:%M:%SZ") for ts in df.index]
 
     # Assemble response
     response: dict = {
-        "runtime":   _normalise_runtime(ds.attrs.get("cycle", "unknown")),
+        "runtime":   _normalise_runtime(cycle_time),
         "latitude":  round(actual_lat, 4),
         "longitude": round(actual_lon, 4),
         "length":    len(df),

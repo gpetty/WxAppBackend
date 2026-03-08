@@ -10,6 +10,8 @@ venv/
 env/
 
 # Data (large GRIB2 and Zarr files — never commit)
+# 'data' is a symlink to /12TB2/NBM on the server; ignore both forms
+data
 data/
 
 # Gunicorn runtime socket (created in WorkingDirectory by gunicorn master process)
@@ -20,7 +22,11 @@ t
 t~
 t.py
 
+# Runtime logs
+nohup.out
+
 # Editor / OS
 .DS_Store
 *.swp
 *~
+*.code-workspace

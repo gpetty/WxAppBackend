@@ -1,18 +1,19 @@
 """
-extraction — query layer for the NBM Zarr store.
+extraction — query layer for the NBM slab ring buffer.
 
 Public API::
 
-    from backend.app.extraction import open_zarr_store, query_forecast
+    from backend.app.extraction import query_forecast, find_nearest_grid_point
 
-    ds  = open_zarr_store(zarr_path)          # once at startup
     df, actual_lat, actual_lon = query_forecast(
-        ds, lat=43.07, lon=-89.40,
+        store=store,
+        lat_grid=lat_grid, lon_grid=lon_grid,
+        lat=43.07, lon=-89.40,
         variables=["temperature", "wind_speed", "sun_elevation"],
         registry=registry,
     )
 """
 
-from .zarr_query import open_zarr_store, query_forecast
+from .slab_query import find_nearest_grid_point, query_forecast
 
-__all__ = ["open_zarr_store", "query_forecast"]
+__all__ = ["find_nearest_grid_point", "query_forecast"]

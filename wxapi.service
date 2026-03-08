@@ -11,9 +11,15 @@ ExecStart=/home/gpetty/WxApp/.venv/bin/gunicorn backend.app.main:app \
     -w 1 \
     --bind 127.0.0.1:8001 \
     --root-path /wxapp \
-    --timeout 30
+    --timeout 30 \
+    --worker-tmp-dir /dev/shm
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+MemoryHigh=70G
+MemoryMax=85G
+MemorySwapMax=0
 
 [Install]
 WantedBy=multi-user.target

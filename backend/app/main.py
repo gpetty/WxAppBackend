@@ -3,15 +3,16 @@ Weather Window — FastAPI application entry point.
 
 Startup
 -------
-The Zarr store and variable registry are loaded once during the lifespan
-startup phase and stored on ``app.state``.  Every request handler receives
-them via ``request.app.state`` — no repeated file I/O per request.
+The slab ring buffer store and variable registry are loaded once during the
+lifespan startup phase and stored on ``app.state``.  Every request handler
+receives them via ``request.app.state``.
 
 Reload
 ------
-When the ingestion pipeline writes a new Zarr store, it can trigger a reload
-by calling ``POST /admin/reload``.  This is an internal endpoint (no auth in
-prototype; restrict in production via nginx allow/deny rules).
+POST /admin/reload re-reads ring_state.json and evicts stale memory-mapped
+slabs for any slot that was refreshed since the last reload.  The store object
+itself stays open — only the ring state is re-read.  Called by the ingest
+pipeline after a successful slab write.
 
 Development
 -----------
@@ -21,15 +22,14 @@ Production
 ----------
     uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
-    Single worker only: the Zarr store lives in app.state and is not shared
-    across processes.  Multi-worker setups would need a shared memory or
-    reload broadcast mechanism — defer until needed.
+    Single worker only: the slab store lives in app.state and is not shared
+    across processes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,82 +38,54 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from .config import ZARR_DIR, VARIABLES_YAML, REPO_ROOT
+from .config import SLAB_STORE_DIR, VARIABLES_YAML, REPO_ROOT
 from .registry import VariableRegistry
-from .extraction import open_zarr_store
+from .store import NBMStore
 from .routers import forecast, variables, status
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
-ZARR_LIVE: Path = ZARR_DIR / "current"
-
 
 # ---------------------------------------------------------------------------
-# Helpers
+# State helpers
 # ---------------------------------------------------------------------------
 
-def _discover_cycle_tags(zarr_dir: Path) -> list[str]:
+def _open_store(app: FastAPI) -> None:
     """
-    Return a sorted list of cycle directory names matching %Y%m%d_%H.
+    Open (or re-open) the slab store and load the lat/lon grid into app.state.
 
-    Skips symlinks and non-directories (e.g. the 'current' symlink).
+    Safe to call at startup even if the store is empty (no runs yet) or if
+    lat.npy hasn't been written yet (first ingest pending).
     """
-    tags = []
-    for entry in zarr_dir.iterdir():
-        if entry.is_symlink() or not entry.is_dir():
-            continue
-        try:
-            datetime.strptime(entry.name, "%Y%m%d_%H")
-            tags.append(entry.name)
-        except ValueError:
-            pass
-    return sorted(tags)
+    app.state.registry = VariableRegistry(VARIABLES_YAML)
 
+    if not (SLAB_STORE_DIR / "metadata.json").exists():
+        log.warning(
+            f"Slab store not initialised at {SLAB_STORE_DIR}. "
+            f"Run 'python -m backend.app.store init' and then ingest first. "
+            f"The /forecast endpoint will return 503 until the store is ready."
+        )
+        app.state.store    = None
+        app.state.lat_grid = None
+        app.state.lon_grid = None
+        app.state.last_loaded = None
+        return
 
-def _load_state(app: FastAPI) -> None:
-    """
-    (Re)load the Zarr store(s) and registry into app.state.
+    store = NBMStore.open(SLAB_STORE_DIR)
 
-    Opens all retained named cycle stores into app.state.stores and resolves
-    the current cycle via the 'current' symlink.  Called once at startup and
-    again on POST /admin/reload.
-    Raises FileNotFoundError if the Zarr store does not exist yet.
-    """
-    registry = VariableRegistry(VARIABLES_YAML)
+    lat_grid = lon_grid = None
+    if (SLAB_STORE_DIR / "lat.npy").exists():
+        lat_grid, lon_grid = store.meta.load_grid(SLAB_STORE_DIR)
 
-    # Open all retained cycle stores (lazy xarray/zarr — just reads metadata)
-    tags = _discover_cycle_tags(ZARR_DIR)
-    stores: dict[str, object] = {}
-    for tag in tags:
-        try:
-            stores[tag] = open_zarr_store(ZARR_DIR / tag)
-        except Exception as exc:
-            log.warning(f"Could not open cycle store {tag}: {exc}")
-
-    # Resolve current cycle tag from symlink
-    current_tag = Path(os.readlink(ZARR_LIVE)).name
-    if current_tag not in stores:
-        # Fallback: open it directly if not already in stores
-        stores[current_tag] = open_zarr_store(ZARR_LIVE)
-
-    ds = stores[current_tag]
-
-    app.state.stores      = stores
-    app.state.current_tag = current_tag
-    app.state.ds          = ds
-    app.state.registry    = registry
-    app.state.zarr_path   = ZARR_LIVE
+    app.state.store       = store
+    app.state.lat_grid    = lat_grid
+    app.state.lon_grid    = lon_grid
     app.state.last_loaded = datetime.now(tz=timezone.utc)
 
     log.info(
-        f"State loaded — cycle: {ds.attrs.get('cycle', 'unknown')}  "
-        f"| {len(ds.data_vars)} variables  "
-        f"| {ds.sizes.get('valid_time', '?')} time steps  "
-        f"| {len(stores)} retained cycle(s): {sorted(stores.keys())}"
+        f"Slab store opened — {store.n_runs_available} run(s) available "
+        f"| is_ready={store.is_ready} "
+        f"| lat/lon grid={'loaded' if lat_grid is not None else 'pending'}"
     )
 
 
@@ -123,29 +95,14 @@ def _load_state(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load the Zarr store at startup; nothing special on shutdown."""
+    """Open the slab store at startup; nothing special on shutdown."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
     )
-
-    if not ZARR_LIVE.exists():
-        log.warning(
-            f"Zarr store not found at {ZARR_LIVE}. "
-            f"Run the ingestion + post-processor first, then restart the API. "
-            f"The /forecast endpoint will return 503 until the store is available."
-        )
-        app.state.stores      = {}
-        app.state.current_tag = None
-        app.state.ds          = None
-        app.state.registry    = VariableRegistry(VARIABLES_YAML)
-        app.state.zarr_path   = ZARR_LIVE
-        app.state.last_loaded = None
-    else:
-        _load_state(app)
-
+    await asyncio.to_thread(_open_store, app)
     yield
-    # Nothing to clean up on shutdown — xarray/zarr handles its own file handles.
+    # Slab mmaps are closed by the OS when the process exits; no explicit cleanup.
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +115,7 @@ app = FastAPI(
         "Point forecast time series from the NOAA National Blend of Models (NBM). "
         "Returns 1-hour resolution data for any CONUS location out to ~11 days."
     ),
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -169,6 +126,7 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
 
 # ---------------------------------------------------------------------------
 # Routers
@@ -186,27 +144,38 @@ app.include_router(status.router)
 @app.post("/admin/reload", include_in_schema=False)
 def admin_reload(request: Request):
     """
-    Reload the Zarr store from disk.
+    Reload the slab ring buffer state from disk.
 
-    Called by the ingestion script after a successful atomic swap.  Not
+    Called by the ingest script after a successful slab write.  Not
     authenticated in the prototype — restrict at the nginx level in production
     so only localhost can reach this path.
     """
-    if not ZARR_LIVE.exists():
-        raise HTTPException(
-            status_code=503,
-            detail=f"Zarr store not found at {ZARR_LIVE}. Run ingestion first.",
-        )
-    try:
-        _load_state(request.app)
-        return {
-            "status":      "ok",
-            "cycle":       request.app.state.ds.attrs.get("cycle", "unknown"),
-            "last_loaded": request.app.state.last_loaded.isoformat(),
-        }
-    except Exception as exc:
-        log.exception("Reload failed")
-        raise HTTPException(status_code=500, detail=f"Reload failed: {exc}")
+    state = request.app.state
+
+    # First-time initialisation after store was created post-startup
+    if state.store is None:
+        if not (SLAB_STORE_DIR / "metadata.json").exists():
+            raise HTTPException(
+                status_code=503,
+                detail=f"Slab store not initialised at {SLAB_STORE_DIR}.",
+            )
+        _open_store(request.app)
+        state = request.app.state
+    else:
+        changed = state.store.reload()
+        # Load lat/lon grid if it wasn't available at startup
+        if state.lat_grid is None and (SLAB_STORE_DIR / "lat.npy").exists():
+            state.lat_grid, state.lon_grid = state.store.meta.load_grid(SLAB_STORE_DIR)
+        state.last_loaded = datetime.now(tz=timezone.utc)
+        log.info(f"Reload — state changed: {changed}")
+
+    store = state.store
+    return {
+        "status":      "ok",
+        "cycle":       store.current_cycle_time if store else None,
+        "is_ready":    store.is_ready if store else False,
+        "last_loaded": state.last_loaded.isoformat() if state.last_loaded else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +197,21 @@ def review_page():
 @app.middleware("http")
 async def require_store(request: Request, call_next):
     """
-    Return 503 for data endpoints if the Zarr store hasn't been loaded yet.
+    Return 503 for data endpoints if the slab store is not ready.
     Pass through /variables, /status, /admin/*, and /docs regardless.
     """
     data_endpoints = {"/forecast"}
-    if request.url.path in data_endpoints and request.app.state.ds is None:
-        from fastapi.responses import JSONResponse
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "Zarr store not yet available. Check /status."},
+    if request.url.path in data_endpoints:
+        state = request.app.state
+        not_ready = (
+            state.store is None
+            or not state.store.is_ready
+            or state.lat_grid is None
         )
+        if not_ready:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Slab store not yet available. Check /status."},
+            )
     return await call_next(request)

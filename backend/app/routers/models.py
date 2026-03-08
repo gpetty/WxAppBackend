@@ -44,11 +44,11 @@ class VariablesResponse(BaseModel):
 
 class StatusResponse(BaseModel):
     """Response body for GET /status."""
-    runtime:          Optional[str]  = Field(None, description="NBM model run (cycle) datetime")
-    store_path:       str
+    runtime:          Optional[str]      = Field(None, description="NBM model run (cycle) datetime")
+    store_path:       str                = Field(description="Path to the slab ring buffer store")
     n_variables:      int
-    n_time_steps:     int
-    last_loaded:      datetime
-    available_cycles: list[str]      = Field(default_factory=list,
-                                             description="Sorted cycle tags retained on disk, "
-                                                         "e.g. ['20260301_00', '20260301_06']")
+    n_time_steps:     int                = Field(description="Forecast time steps in current run")
+    last_loaded:      Optional[datetime] = Field(None, description="When the store was last opened or reloaded")
+    available_cycles: list[str]          = Field(default_factory=list,
+                                                 description="Sorted cycle tags in the ring buffer, "
+                                                             "e.g. ['20260301_00', '20260301_06']")

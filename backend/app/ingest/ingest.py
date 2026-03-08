@@ -428,19 +428,18 @@ def run_ingestion(
       3. Check if already staged (skip unless force=True)
       4. Download all forecast hours
       5. Write manifest
-      6. (Optional) Run GRIB2 → Zarr post-processing
+      6. (Optional) Run GRIB2 → slab ring buffer post-processing
       7. Release lock
 
     Parameters
     ----------
     postprocess : bool
-        If True, run the GRIB2 → Zarr post-processor after download.
+        If True, run the slab ingest post-processor after download.
     keep_staging : bool
         If True and postprocess is True, keep the GRIB2 files after post-processing.
         Ignored if postprocess is False.
 
-    Returns the path to the staging directory for this cycle (or the Zarr
-    live directory if postprocess=True and staging was deleted).
+    Returns the path to the staging directory for this cycle.
     Raises LockError, RuntimeError on failure.
     """
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -466,14 +465,14 @@ def run_ingestion(
             )
             # Still allow post-processing of an already-staged cycle
             if postprocess:
-                log.info("Running post-processor on existing staged cycle...")
-                from ..postprocessor import run_postprocessor
-                stats = run_postprocessor(
+                log.info("Running slab ingest on existing staged cycle...")
+                from ..postprocessor.slab_ingest import run_slab_ingest
+                stats = run_slab_ingest(
                     staging_dir=cycle_staging,
                     cycle_tag=cycle_tag,
                     delete_staging=not keep_staging,
                 )
-                log.info(f"Post-processing stats: {stats}")
+                log.info(f"Slab ingest stats: {stats}")
             return cycle_staging
 
         # --- Download ---
@@ -495,13 +494,13 @@ def run_ingestion(
 
         # --- Post-process ---
         if postprocess and not dry_run:
-            log.info("Starting post-processing (GRIB2 → Zarr)...")
-            from ..postprocessor import run_postprocessor
-            stats = run_postprocessor(
+            log.info("Starting slab ingest (GRIB2 → slab ring buffer)...")
+            from ..postprocessor.slab_ingest import run_slab_ingest
+            stats = run_slab_ingest(
                 staging_dir=cycle_staging,
                 cycle_tag=cycle_tag,
                 delete_staging=not keep_staging,
             )
-            log.info(f"Post-processing stats: {stats}")
+            log.info(f"Slab ingest stats: {stats}")
 
         return cycle_staging
