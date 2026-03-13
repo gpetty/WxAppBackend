@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from ..config import SLAB_STORE_DIR
 from .models import StatusResponse
 
 router = APIRouter()
@@ -24,7 +23,7 @@ def get_status(request: Request) -> StatusResponse:
     if store is None or not store.is_ready:
         return StatusResponse(
             runtime=None,
-            store_path=str(SLAB_STORE_DIR),
+            store_path=str(store._store_dir) if store is not None else "unavailable",
             n_variables=0,
             n_time_steps=0,
             last_loaded=state.last_loaded,
@@ -34,7 +33,7 @@ def get_status(request: Request) -> StatusResponse:
     current_run = store._state.current_run()
     return StatusResponse(
         runtime=store.current_cycle_time,
-        store_path=str(SLAB_STORE_DIR),
+        store_path=str(store._store_dir),
         n_variables=len(store.variable_names),
         n_time_steps=current_run.n_fxx if current_run else 0,
         last_loaded=state.last_loaded,

@@ -11,11 +11,11 @@
 #          sudo systemctl enable --now wxndfdingest.timer
 
 [Unit]
-Description=Weather Window NDFD Ingestion — hourly
+Description=Weather Window NDFD Ingestion — 3-hourly
 
 [Timer]
-OnCalendar=hourly
-RandomizedDelaySec=3min
+OnCalendar=*-*-* 00,03,06,09,12,15,18,21:00:00
+RandomizedDelaySec=5min
 Persistent=true
 
 [Install]

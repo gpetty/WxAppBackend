@@ -83,9 +83,9 @@ NDFD_JDIM: int = 2145   # cols (x)
 # ~65 actual time steps (49 VP.001-003 + 16 VP.004-007) plus margin.
 NDFD_SLAB_N_FXX:  int = 70
 
-# Retain 28 snapshots (7 days × 4 snapshots/day at hourly scheduler).
-# NDFD doesn't have fixed cycles; snapshots are triggered by changed reference times.
-NDFD_SLAB_N_RUNS: int = int(os.environ.get("NDFD_SLAB_N_RUNS", 28))
+# Retain 48 snapshots (6 days × 8 snapshots/day at 3-hourly scheduler).
+# Covers 6 days of drift history; front-end picks runs at 24-hour intervals.
+NDFD_SLAB_N_RUNS: int = int(os.environ.get("NDFD_SLAB_N_RUNS", 48))
 
 # ---------------------------------------------------------------------------
 # Download concurrency

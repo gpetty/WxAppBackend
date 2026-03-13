@@ -94,10 +94,16 @@ def _response_key(var_name: str, units_out: str) -> str:
     return f"{var_name}_{suffix}" if suffix else var_name
 
 
-def _round_val(val: float, decimals: int) -> Optional[float]:
-    if val is None or (isinstance(val, float) and (math.isnan(val) or math.isinf(val))):
+def _round_val(val, decimals: int) -> Optional[float]:
+    if val is None:
         return None
-    return round(float(val), decimals)
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f):
+        return None
+    return round(f, decimals)
 
 
 def _parse_timestamp(value: str, param: str) -> pd.Timestamp:

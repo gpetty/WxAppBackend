@@ -106,8 +106,8 @@ def _interp_circular(series: pd.Series) -> pd.Series:
     sin_s = pd.Series(np.sin(rad), index=series.index)
     cos_s = pd.Series(np.cos(rad), index=series.index)
 
-    sin_i = sin_s.interpolate(method="time")
-    cos_i = cos_s.interpolate(method="time")
+    sin_i = sin_s.interpolate(method="time", limit_area="inside")
+    cos_i = cos_s.interpolate(method="time", limit_area="inside")
 
     degrees = np.degrees(np.arctan2(sin_i.values, cos_i.values)) % 360.0
     return pd.Series(degrees, index=series.index, name=series.name, dtype=np.float32)
@@ -143,7 +143,10 @@ def _upsample_to_hourly(
         elif col in _CATEGORICAL_VARS:
             result_cols[col] = df[col].ffill()
         else:
-            result_cols[col] = df[col].interpolate(method="time")
+            # limit_area='inside' fills only NaN surrounded by valid values on both
+            # sides — prevents trailing extension of VP.001-003-only variables
+            # (visibility, cloud_ceiling, etc.) into VP.004-007 time slots.
+            result_cols[col] = df[col].interpolate(method="time", limit_area="inside")
 
     result = pd.DataFrame(result_cols, index=hourly_index)
     result["interpolated"] = interpolated_mask
