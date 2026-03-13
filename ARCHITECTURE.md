@@ -16,7 +16,8 @@
 ┌─────────────────────────────────────────────────────────┐
 │           Ubuntu Server: precip.aos.wisc.edu             │
 │                                                         │
-│  ┌──────────────────┐    ┌────────────────────────────┐ │
+│  ┌──────────────────┐    ┌───────────────────────────
+─┐ │
 │  │  Ingestion       │    │  GRIB2 Staging Store       │ │
 │  │  (systemd timer) │───▶│  /data/nbm/staging/        │ │
 │  │  Herbie + Python │    │  ~15 GB, current download │ │

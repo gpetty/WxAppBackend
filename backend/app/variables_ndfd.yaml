@@ -1,0 +1,208 @@
+# Weather Window NDFD variable registry
+#
+# Each native variable maps a human-readable name to its NDFD source element
+# and cfgrib identifiers.  The post-processor uses this file to decide what
+# to extract; the API uses it to validate requests and annotate responses.
+#
+# Key fields:
+#   s3_element       : NDFD element abbreviation (filename = ds.{s3_element}.bin)
+#   cfgrib_var_key   : xarray variable name assigned by cfgrib
+#                      Use "unknown" for variables cfgrib cannot identify
+#                      (non-standard NCEP local table entries).  Since each
+#                      ds.*.bin file contains exactly one element, "unknown"
+#                      is unambiguous — the file name IS the identifier.
+#   grib_shortName   : GRIB2 shortName as reported by cfgrib (may be "unknown")
+#   grib_typeOfLevel : GRIB2 typeOfLevel string
+#   units_raw        : units as delivered by cfgrib (before conversion)
+#   units_out        : units stored in the slab (after conversion)
+#   period_cutoff    : only VP.001-003 has this element; absent from VP.004-007
+#                      (analogous to fxx_cutoff in variables.yaml)
+#
+# Empirically verified against ds.*.bin files from noaa-ndfd-pds, 2026-03-12.
+#
+# Note on "unknown" shortNames:
+#   apt, sky, wbgt, ptotsvrtstm, qpf, snow all return shortName=unknown from
+#   cfgrib.  Their units are inferred from the NDFD element definition:
+#     apt   → K (apparent temperature; same formula as temp/td)
+#     sky   → % (sky cover 0-100)
+#     wbgt  → K (wet bulb globe temp; same units as temperature)
+#     ptotsvrtstm → % (probability 0-100)
+#     qpf   → kg m**-2 (= mm liquid-equivalent; same as NBM tp)
+#     snow  → kg m**-2 (snowfall water equivalent in mm)
+#
+# Note on cloud ceiling:
+#   NDFD cig uses typeOfLevel=surface (not cloudCeiling as in NBM).
+
+variables:
+
+  # ---------------------------------------------------------------------------
+  # Near-surface temperature & humidity
+  # ---------------------------------------------------------------------------
+
+  temperature:
+    s3_element:       temp
+    cfgrib_var_key:   t2m
+    grib_shortName:   "2t"
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        K
+    units_out:        F
+    description:      "2-metre air temperature"
+
+  dewpoint:
+    s3_element:       td
+    cfgrib_var_key:   d2m
+    grib_shortName:   "2d"
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        K
+    units_out:        F
+    description:      "2-metre dewpoint temperature"
+
+  relative_humidity:
+    s3_element:       rhm
+    cfgrib_var_key:   r2
+    grib_shortName:   "2r"
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        "%"
+    units_out:        "%"
+    description:      "2-metre relative humidity"
+
+  apparent_temperature:
+    s3_element:       apt
+    cfgrib_var_key:   unknown
+    grib_shortName:   unknown
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        K
+    units_out:        F
+    description:      "Apparent temperature (NDFD feels-like; encompasses heat index / wind chill)"
+
+  # ---------------------------------------------------------------------------
+  # Wind (10 m)
+  # ---------------------------------------------------------------------------
+
+  wind_speed:
+    s3_element:       wspd
+    cfgrib_var_key:   si10
+    grib_shortName:   "10si"
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        "m s**-1"
+    units_out:        mph
+    description:      "10-metre wind speed"
+
+  wind_direction:
+    s3_element:       wdir
+    cfgrib_var_key:   wdir10
+    grib_shortName:   "10wdir"
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        "Degree true"
+    units_out:        "Degree true"
+    description:      "10-metre wind direction (meteorological, degrees from north)"
+
+  wind_gust:
+    s3_element:       wgust
+    cfgrib_var_key:   i10fg
+    grib_shortName:   i10fg
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        "m s**-1"
+    units_out:        mph
+    description:      "Instantaneous 10-metre wind gust"
+
+  # ---------------------------------------------------------------------------
+  # Precipitation & convection
+  # ---------------------------------------------------------------------------
+
+  total_precipitation:
+    s3_element:       qpf
+    cfgrib_var_key:   unknown
+    grib_shortName:   unknown
+    grib_typeOfLevel: surface
+    units_raw:        "kg m**-2"
+    units_out:        "mm"
+    description:      "Quantitative precipitation forecast (liquid-equivalent accumulation)"
+    period_cutoff:    "VP.001-003"   # absent from VP.004-007
+
+  thunderstorm_probability:
+    s3_element:       ptotsvrtstm
+    cfgrib_var_key:   unknown
+    grib_shortName:   unknown
+    grib_typeOfLevel: surface
+    units_raw:        "%"
+    units_out:        "%"
+    description:      >
+      Total severe thunderstorm probability (NDFD ptotsvrtstm).
+      Note: this is total *severe* tstm probability, not general thunderstorm
+      probability as in NBM.  Includes combined tstm wind / hail / tornado risk.
+
+  # ---------------------------------------------------------------------------
+  # Cloud & sky
+  # ---------------------------------------------------------------------------
+
+  cloud_cover:
+    s3_element:       sky
+    cfgrib_var_key:   unknown
+    grib_shortName:   unknown
+    grib_typeOfLevel: surface
+    units_raw:        "%"
+    units_out:        "%"
+    description:      "Sky cover (total cloud cover, all layers), 0–100 %"
+
+  # ---------------------------------------------------------------------------
+  # Visibility & ceiling
+  # ---------------------------------------------------------------------------
+
+  visibility:
+    s3_element:       vis
+    cfgrib_var_key:   vis
+    grib_shortName:   vis
+    grib_typeOfLevel: surface
+    units_raw:        m
+    units_out:        miles
+    description:      "Horizontal visibility at surface"
+    period_cutoff:    "VP.001-003"   # absent from VP.004-007
+
+  cloud_ceiling:
+    s3_element:       cig
+    cfgrib_var_key:   ceil
+    grib_shortName:   ceil
+    grib_typeOfLevel: surface          # NOTE: NDFD uses surface, not cloudCeiling
+    units_raw:        m
+    units_out:        feet
+    description:      "Cloud ceiling height (base of lowest cloud layer)"
+    period_cutoff:    "VP.001-003"   # absent from VP.004-007
+
+  # ---------------------------------------------------------------------------
+  # Heat stress
+  # ---------------------------------------------------------------------------
+
+  wet_bulb_globe_temp:
+    s3_element:       wbgt
+    cfgrib_var_key:   unknown
+    grib_shortName:   unknown
+    grib_typeOfLevel: heightAboveGround
+    units_raw:        K
+    units_out:        F
+    description:      "Wet bulb globe temperature (heat stress index)"
+
+  # ---------------------------------------------------------------------------
+  # Snow
+  # ---------------------------------------------------------------------------
+
+  snowfall:
+    s3_element:       snow
+    cfgrib_var_key:   unknown
+    grib_shortName:   unknown
+    grib_typeOfLevel: surface
+    units_raw:        "kg m**-2"
+    units_out:        "mm"
+    description:      "Snowfall water equivalent accumulation"
+    period_cutoff:    "VP.001-003"   # absent from VP.004-007
+
+  # ---------------------------------------------------------------------------
+  # Derived variables (computed at query time; not stored in slabs)
+  # ---------------------------------------------------------------------------
+
+  sun_elevation:
+    derived:          true
+    requires:         [lat, lon, valid_time]
+    formula:          pysolar
+    units_out:        degrees
+    description:      "Solar elevation angle above horizon (astronomical, no atmospheric correction)"

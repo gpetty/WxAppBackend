@@ -1,0 +1,33 @@
+# /etc/systemd/system/wxndfdapi.service
+#
+# Weather Window NDFD API (parallel to wxapi.service which serves NBM on port 8001)
+# Install: sudo cp systemd/wxndfdapi.service /etc/systemd/system/
+#          sudo systemctl daemon-reload
+#          sudo systemctl enable --now wxndfdapi.service
+
+[Unit]
+Description=Weather Window NDFD FastAPI
+After=network.target
+
+[Service]
+User=gpetty
+WorkingDirectory=/home/gpetty/WxApp
+Environment=NDFD_DATA_DIR=/12TB2/NDFD
+ExecStart=/home/gpetty/WxApp/.venv/bin/gunicorn backend.app.ndfd_main:app \
+    -k uvicorn.workers.UvicornWorker \
+    -w 1 \
+    --bind 127.0.0.1:8002 \
+    --root-path /wxndfd \
+    --timeout 30 \
+    --worker-tmp-dir /dev/shm
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+MemoryHigh=30G
+MemoryMax=40G
+MemorySwapMax=0
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

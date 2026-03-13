@@ -1,0 +1,24 @@
+# /etc/systemd/system/wxndfdingest.service
+#
+# Weather Window NDFD Ingestion (oneshot; triggered by wxndfdingest.timer)
+# Install: sudo cp systemd/wxndfdingest.service /etc/systemd/system/
+#          sudo systemctl daemon-reload
+
+[Unit]
+Description=Weather Window NDFD Ingestion
+After=network.target
+
+[Service]
+Type=oneshot
+User=gpetty
+WorkingDirectory=/home/gpetty/WxApp
+Environment=NDFD_DATA_DIR=/12TB2/NDFD
+Environment=AWS_NO_SIGN_REQUEST=yes
+ExecStart=/home/gpetty/WxApp/.venv/bin/python -m backend.app.ingest.ndfd_ingest \
+    --postprocess
+ExecStartPost=-/usr/bin/curl -s --max-time 30 -X POST http://127.0.0.1:8002/admin/reload
+StandardOutput=journal
+StandardError=journal
+MemoryHigh=6G
+MemoryMax=8G
+MemorySwapMax=0
