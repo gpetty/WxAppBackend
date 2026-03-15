@@ -30,7 +30,6 @@ age_hours int     Return cycle at least this many hours older than current (0 = 
 
 from __future__ import annotations
 
-import math
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
@@ -40,94 +39,13 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..extraction import query_forecast
 from ..registry import NativeVariable, DerivedVariable
+from .helpers import (
+    _UNIT_SUFFIX, _DECIMAL_PLACES, _DEFAULT_DECIMALS,
+    _response_key, _round_val, _parse_timestamp, _normalise_runtime,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-
-
-# ---------------------------------------------------------------------------
-# Unit suffix table
-# ---------------------------------------------------------------------------
-
-_UNIT_SUFFIX: dict[str, str] = {
-    "F":                   "F",
-    "%":                   "pct",
-    "mph":                 "mph",
-    "Degree true":         "deg",
-    "degrees":             "deg",
-    "mm":                  "mm",
-    "miles":               "mi",
-    "feet":                "ft",
-    "J kg**-1":            "Jkg",
-    "W m**-2":             "Wm2",
-    "(Code table 4.201)":  "code",
-    "kg m**-2":            "mm",
-}
-
-_DECIMAL_PLACES: dict[str, int] = {
-    "temperature":              1,
-    "dewpoint":                 1,
-    "apparent_temperature":     1,
-    "relative_humidity":        0,
-    "wind_speed":               1,
-    "wind_gust":                1,
-    "wind_direction":           0,
-    "total_precipitation":      2,
-    "precip_type":              0,
-    "thunderstorm_probability": 0,
-    "cape":                     0,
-    "cloud_cover":              0,
-    "solar_radiation":          0,
-    "visibility":               2,
-    "cloud_ceiling":            0,
-    "sun_elevation":            1,
-}
-_DEFAULT_DECIMALS = 1
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _response_key(var_name: str, units_out: str) -> str:
-    suffix = _UNIT_SUFFIX.get(units_out, "")
-    return f"{var_name}_{suffix}" if suffix else var_name
-
-
-def _round_val(val, decimals: int) -> Optional[float]:
-    if val is None:
-        return None
-    try:
-        f = float(val)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(f):
-        return None
-    return round(f, decimals)
-
-
-def _parse_timestamp(value: str, param: str) -> pd.Timestamp:
-    try:
-        ts = pd.Timestamp(value)
-        return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-    except Exception:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid datetime for '{param}': {value!r}. "
-                   "Expected ISO-8601, e.g. '2026-02-27T18:00:00Z'.",
-        )
-
-
-def _normalise_runtime(raw: Optional[str]) -> Optional[str]:
-    """Return a clean UTC ISO-8601 string with Z suffix, or None."""
-    if not raw:
-        return None
-    try:
-        ts = pd.Timestamp(raw)
-        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-        return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-    except Exception:
-        return raw
 
 
 # ---------------------------------------------------------------------------

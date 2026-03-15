@@ -1,0 +1,17 @@
+# /etc/systemd/system/wxmonitor@ndfd.timer
+#
+# Install:
+#   sudo cp systemd/wxmonitor@ndfd.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wxmonitor@ndfd.timer
+
+[Unit]
+Description=Weather Window health monitor — NDFD (every 20 min)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=20min
+Unit=wxmonitor@ndfd.service
+
+[Install]
+WantedBy=timers.target

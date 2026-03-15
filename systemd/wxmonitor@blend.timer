@@ -1,0 +1,17 @@
+# /etc/systemd/system/wxmonitor@blend.timer
+#
+# Install:
+#   sudo cp systemd/wxmonitor@blend.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wxmonitor@blend.timer
+
+[Unit]
+Description=Weather Window health monitor — Blend (every 20 min)
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=20min
+Unit=wxmonitor@blend.service
+
+[Install]
+WantedBy=timers.target

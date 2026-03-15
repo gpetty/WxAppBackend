@@ -11,14 +11,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from ..registry import NativeVariable, DerivedVariable
-from .forecast import _UNIT_SUFFIX, _response_key
+from .helpers import _suffix
 from .models import NativeVariableInfo, DerivedVariableInfo, VariablesResponse
 
 router = APIRouter()
-
-
-def _suffix(units_out: str) -> str:
-    return _UNIT_SUFFIX.get(units_out, "")
 
 
 @router.get("/variables", response_model=VariablesResponse)

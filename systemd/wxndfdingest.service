@@ -17,6 +17,7 @@ Environment=AWS_NO_SIGN_REQUEST=yes
 ExecStart=/home/gpetty/WxApp/.venv/bin/python -m backend.app.ingest.ndfd_ingest \
     --postprocess
 ExecStartPost=-/usr/bin/curl -s --max-time 30 -X POST http://127.0.0.1:8002/admin/reload
+ExecStartPost=-/usr/bin/curl -s --max-time 30 -X POST http://127.0.0.1:8004/admin/reload
 StandardOutput=journal
 StandardError=journal
 MemoryHigh=20G

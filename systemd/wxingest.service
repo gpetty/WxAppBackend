@@ -1,0 +1,29 @@
+# /etc/systemd/system/wxingest.service
+#
+# Weather Window NBM Ingestion (oneshot; triggered by wxingest.timer)
+# Downloads and processes one NBM cycle, then reloads the NBM API and
+# the Blend API.
+#
+# Install:
+#   sudo cp systemd/wxingest.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+
+[Unit]
+Description=Weather Window NBM Ingestion
+After=network.target
+
+[Service]
+Type=oneshot
+User=gpetty
+WorkingDirectory=/home/gpetty/WxApp
+Environment=DATA_DIR=/12TB2/NBM
+Environment=AWS_NO_SIGN_REQUEST=yes
+ExecStart=/home/gpetty/WxApp/.venv/bin/python -m backend.app.ingest \
+    --postprocess
+ExecStartPost=-/usr/bin/curl -s --max-time 30 -X POST http://127.0.0.1:8001/admin/reload
+ExecStartPost=-/usr/bin/curl -s --max-time 30 -X POST http://127.0.0.1:8004/admin/reload
+StandardOutput=journal
+StandardError=journal
+MemoryHigh=20G
+MemoryMax=24G
+MemorySwapMax=0

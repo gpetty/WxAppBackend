@@ -1,0 +1,17 @@
+# /etc/systemd/system/wxmonitor@nbm.timer
+#
+# Install:
+#   sudo cp systemd/wxmonitor@nbm.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wxmonitor@nbm.timer
+
+[Unit]
+Description=Weather Window health monitor — NBM (every 20 min)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=20min
+Unit=wxmonitor@nbm.service
+
+[Install]
+WantedBy=timers.target

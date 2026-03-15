@@ -51,8 +51,13 @@ ZARR_RETAIN_HOURS: tuple[int, ...] = (0, 6, 12, 18)
 SLAB_STORE_DIR: Path = DATA_ROOT / "slabs"
 
 # Number of forecast runs retained in the outer ring buffer.
-# 28 = 7 days × 4 major cycles (00Z/06Z/12Z/18Z) per day.
-SLAB_N_RUNS: int = int(os.environ.get("SLAB_N_RUNS", 28))
+# 56 = 7 days × 8 cycles/day at 3-hourly cadence (00/03/06/09/12/15/18/21Z).
+# NOTE: changing this value requires re-initialising the slab store:
+#   systemctl stop wxapi
+#   python -m backend.app.store init   # wipes existing ring buffer
+#   systemctl start wxapi
+#   (first ingest will repopulate one slot; drift history rebuilds over ~7 days)
+SLAB_N_RUNS: int = int(os.environ.get("SLAB_N_RUNS", 56))
 
 # Number of forecast time steps per run (one per GRIB2 file in the NBM cycle).
 # 99 = 36 hourly (f001–f036) + 51 three-hourly (f038–f188) + 12 six-hourly (f194–f260)

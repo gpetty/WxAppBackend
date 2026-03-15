@@ -1,0 +1,40 @@
+# /etc/systemd/system/wxblendapi.service
+#
+# Weather Window Blend API — merges NBM + NDFD into a single blended forecast.
+# Reads from both the NBM slab store (/12TB2/NBM/slabs) and the NDFD slab
+# store (/12TB2/NDFD/slabs); does NOT run its own ingest.
+#
+# Port 8004 — Caddy reverse-proxies /blend/* to here.
+#
+# Install:
+#   sudo cp systemd/wxblendapi.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wxblendapi.service
+
+[Unit]
+Description=Weather Window Blend API (NBM + NDFD)
+After=network.target wxapi.service wxndfdapi.service
+
+[Service]
+User=gpetty
+WorkingDirectory=/home/gpetty/WxApp
+Environment=DATA_DIR=/12TB2/NBM
+Environment=NDFD_DATA_DIR=/12TB2/NDFD
+ExecStart=/home/gpetty/WxApp/.venv/bin/gunicorn backend.app.blend_main:app \
+    -k uvicorn.workers.UvicornWorker \
+    -w 1 \
+    --bind 127.0.0.1:8004 \
+    --root-path /blend \
+    --timeout 30 \
+    --worker-tmp-dir /dev/shm
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+MemoryHigh=30G
+MemoryMax=40G
+MemorySwapMax=0
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

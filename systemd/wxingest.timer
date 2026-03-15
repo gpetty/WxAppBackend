@@ -1,0 +1,21 @@
+# /etc/systemd/system/wxingest.timer
+#
+# Weather Window NBM Ingestion — 3-hourly trigger, synchronized with NDFD.
+# Fires at 00, 03, 06, 09, 12, 15, 18, 21 UTC so NBM and NDFD cycle times
+# align, making blended drift snapshots directly comparable between sources.
+#
+# Install:
+#   sudo cp systemd/wxingest.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wxingest.timer
+
+[Unit]
+Description=Weather Window NBM Ingestion — 3-hourly
+
+[Timer]
+OnCalendar=*-*-* 00,03,06,09,12,15,18,21:00:00
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
