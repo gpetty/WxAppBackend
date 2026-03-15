@@ -31,8 +31,11 @@ Restart=always
 RestartSec=5
 StartLimitIntervalSec=300
 StartLimitBurst=5
-MemoryHigh=30G
-MemoryMax=40G
+# The blend service's data is file-backed mmaps shared with wxapi and wxndfdapi —
+# those pages are already resident and charged to the other services' cgroups.
+# Private process overhead (gunicorn + Python + pandas) is modest.
+MemoryHigh=6G
+MemoryMax=8G
 MemorySwapMax=0
 LimitNOFILE=65536
 

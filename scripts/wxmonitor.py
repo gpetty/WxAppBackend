@@ -38,21 +38,21 @@ ALERT_EMAIL = "grantwp3@gmail.com"
 SERVICE_CONFIGS: dict[str, dict] = {
     "nbm": {
         "status_url":    "http://127.0.0.1:8001/status",
-        "hc_uuid":       "1ffbadd7-5c6b-4217-a709-b272eec6476f",       # ← replace
+        "hc_uuid":       "1ffbadd7-5c6b-4217-a709-b272eec6476f",
         "max_age_h":     6.0,
         "runtime_field": "runtime",                    # field in /status response
         "label":         "NBM API",
     },
     "ndfd": {
         "status_url":    "http://127.0.0.1:8002/status",
-        "hc_uuid":       "1ffbadd7-5c6b-4217-a709-b272eec6476f",      # ← replace
+        "hc_uuid":       "1ffbadd7-5c6b-4217-a709-b272eec6476f",
         "max_age_h":     6.0,
         "runtime_field": "runtime",
         "label":         "NDFD API",
     },
     "blend": {
         "status_url":    "http://127.0.0.1:8004/status",
-        "hc_uuid":       "1ffbadd7-5c6b-4217-a709-b272eec6476f",     # ← replace
+        "hc_uuid":       "1ffbadd7-5c6b-4217-a709-b272eec6476f",
         "max_age_h":     6.0,
         # Blend /status has separate nbm_runtime and ndfd_runtime.
         # We check the older of the two; either stale means the blend is stale.

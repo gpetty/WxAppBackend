@@ -113,14 +113,14 @@
 - [x] All three healthchecks.io UUIDs to fill in (`FILL_IN_*_HC_UUID` placeholders)
 
 ### 3.4 Deployment ← *current*
-- [ ] Re-init NBM slab store after `SLAB_N_RUNS` change (brief outage required)
-- [ ] Copy systemd units to `/etc/systemd/system/`, `daemon-reload`, enable/start `wxblendapi.service`
-- [ ] Copy updated `wxingest.service`, `wxingest.timer` to `/etc/systemd/system/` and reload timer
-- [ ] Copy updated monitor units and enable three timer instances
-- [ ] Copy `Caddyfile.tmp` → `/etc/caddy/Caddyfile`, reload Caddy
-- [ ] Fill in three healthchecks.io UUIDs in `scripts/wxmonitor.py`
-- [ ] Smoke test: `curl https://precip.aos.wisc.edu/blend/status`
-- [ ] Smoke test: `curl 'https://precip.aos.wisc.edu/blend/forecast?lat=43.07&lon=-89.4&vars=temperature,wind_speed'`
+- [x] Re-init NBM slab store after `SLAB_N_RUNS` change (brief outage required)
+- [x] Copy systemd units to `/etc/systemd/system/`, `daemon-reload`, enable/start `wxblendapi.service`
+- [x] Copy updated `wxingest.service`, `wxingest.timer` to `/etc/systemd/system/` and reload timer
+- [x] Copy updated monitor units and enable three timer instances
+- [x] Copy `Caddyfile.tmp` → `/etc/caddy/Caddyfile`, reload Caddy
+- [x] Fill in three healthchecks.io UUIDs in `scripts/wxmonitor.py` (all three share one UUID)
+- [x] Smoke test: `curl http://127.0.0.1:8004/status` — both sources ready ✓
+- [x] Smoke test: forecast endpoint — 257 steps, NDFD days 1–7 / NBM days 8–10, zero nulls ✓
 
 ---
 
