@@ -165,8 +165,12 @@ def find_latest_cycle(max_lookback_hours: int = 24) -> Optional[datetime]:
     """
     Walk back from the current UTC hour until we find a cycle available on S3.
 
-    NBM files typically appear ~30–60 min after the cycle time, so we start
-    looking 2 hours back and search up to max_lookback_hours.
+    NBM files typically appear ~30–60 min after the cycle time.  We start
+    looking 1 hour back (the most recent cycle that could plausibly be on S3)
+    and fall back further if it isn't available yet.  Starting at 1h rather
+    than 2h keeps NBM runtime within ~1h of the NDFD reference time so the
+    two sources in the blend are not sourced from substantially different
+    forecast vintages.
 
     Returns a naive UTC datetime on success, or None if not found.
     """
@@ -174,7 +178,7 @@ def find_latest_cycle(max_lookback_hours: int = 24) -> Optional[datetime]:
     now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
     log.info(f"Current UTC: {now:%Y-%m-%d %H:%M}  (searching back up to {max_lookback_hours} hours)")
 
-    for hours_ago in range(2, max_lookback_hours + 1):
+    for hours_ago in range(1, max_lookback_hours + 1):
         candidate = now - timedelta(hours=hours_ago)
         date_str = candidate.strftime("%Y-%m-%d %H:00")
         try:

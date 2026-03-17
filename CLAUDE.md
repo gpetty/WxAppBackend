@@ -68,9 +68,13 @@ See DATA.md for source documentation and access details.
 
 ## Current Status
 
-**Phase 1.1–1.5 complete.** The ingestion pipeline and GRIB2 → Zarr post-processor are working end-to-end. Tested with a 3-file subset (one file from each fxx segment): 14 of 15 native variables extracted successfully, Zarr store written in 4.6s with 256×256 spatial chunks. `precip_probability` correctly skipped (only at accumulation-boundary steps, none in the test set). Full 100-file cycle test pending on native Mac hardware.
+**Backend pipeline fully operational on production server (precip.aos.wisc.edu).** NBM and NDFD ingestion running on 3-hourly systemd timers. Blend API (port 8004) serving merged NBM+NDFD forecasts via Caddy at `/blend/`.
 
-**Next task: Phase 1.6 — Point extraction & derived variables.** See ROADMAP.md.
+**Blend API fixes applied 2026-03-17:**
+- Forecast responses now trimmed to current UTC hour by default — past timesteps no longer returned.
+- NBM cycle lookback reduced from 2h to 1h in `find_latest_cycle()`, keeping NBM runtime within ~1–2h of NDFD runtime (was up to 5h).
+
+**Next task:** Frontend development (React PWA). See ROADMAP.md.
 
 Files produced so far:
 - `backend/app/variables.yaml` — variable registry (15 native + 3 derived)

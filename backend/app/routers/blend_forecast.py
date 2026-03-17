@@ -393,8 +393,11 @@ def get_blend_forecast(
     unified_end   = max(ends)
     unified_index = pd.date_range(start=unified_start, end=unified_end, freq="1h", tz="UTC")
 
-    # Apply optional time filters to the unified index
-    if start_ts is not None:
+    # Always trim past hours — floor to current UTC hour unless caller supplied an explicit start.
+    if start_ts is None:
+        now_floor = pd.Timestamp(datetime.utcnow().replace(minute=0, second=0, microsecond=0)).tz_localize("UTC")
+        unified_index = unified_index[unified_index >= now_floor]
+    else:
         unified_index = unified_index[unified_index >= start_ts]
     if end_ts is not None:
         unified_index = unified_index[unified_index <= end_ts]
