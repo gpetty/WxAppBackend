@@ -30,3 +30,5 @@ nohup.out
 *.swp
 *~
 *.code-workspace
+Caddyfile.tmp
+SINGLE_SOURCE_OPTION.md

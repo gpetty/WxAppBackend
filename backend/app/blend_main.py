@@ -27,8 +27,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
-from .config import SLAB_STORE_DIR, VARIABLES_YAML
+from .config import SLAB_STORE_DIR, VARIABLES_YAML, REPO_ROOT
 from .config_ndfd import NDFD_SLAB_STORE_DIR, NDFD_VARIABLES_YAML
 from .registry import VariableRegistry
 from .store.nbm_store import NBMStore
@@ -144,6 +145,18 @@ app.add_middleware(
 app.include_router(blend_forecast.router)
 app.include_router(blend_status.router)
 app.include_router(blend_variables.router)
+
+
+# ---------------------------------------------------------------------------
+# Review page
+# ---------------------------------------------------------------------------
+
+_REVIEW_HTML = REPO_ROOT / "blend_review.html"
+
+@app.get("/review", include_in_schema=False)
+def review_page():
+    """Serve the blend forecast review tool (single-page HTML + Chart.js)."""
+    return FileResponse(_REVIEW_HTML, media_type="text/html")
 
 
 # ---------------------------------------------------------------------------

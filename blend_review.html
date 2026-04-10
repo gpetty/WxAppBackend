@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Blend Forecast Review</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      margin: 0;
+      padding: 1rem;
+    }
+
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin: 0 0 1rem;
+      color: #93c5fd;
+    }
+
+    /* ── Controls bar ── */
+    #controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      align-items: flex-end;
+      background: #1e2333;
+      border: 1px solid #2d3552;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+    }
+
+    .field { display: flex; flex-direction: column; gap: 3px; }
+
+    label { font-size: 0.72rem; color: #94a3b8; text-transform: uppercase; letter-spacing: .04em; }
+
+    input[type="number"], input[type="text"] {
+      background: #0f1117;
+      border: 1px solid #374151;
+      border-radius: 5px;
+      color: #e2e8f0;
+      padding: 0.35rem 0.5rem;
+      font-size: 0.875rem;
+      width: 9rem;
+    }
+
+    button {
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      padding: 0.4rem 1rem;
+      font-size: 0.875rem;
+      cursor: pointer;
+      align-self: flex-end;
+    }
+    button:hover { background: #1d4ed8; }
+    button:disabled { background: #374151; cursor: not-allowed; }
+
+    /* ── Status bar ── */
+    #status-bar {
+      font-size: 0.78rem;
+      color: #64748b;
+      margin-bottom: 0.75rem;
+      min-height: 1.2em;
+    }
+    #status-bar.error { color: #f87171; }
+    #status-bar.ok    { color: #34d399; }
+
+    /* ── Legend ── */
+    #legend {
+      display: none;
+      align-items: center;
+      gap: 1.2rem;
+      font-size: 0.78rem;
+      color: #94a3b8;
+      margin-bottom: 0.75rem;
+    }
+    .legend-item { display: flex; align-items: center; gap: 0.35rem; }
+    .legend-swatch { width: 24px; height: 3px; border-radius: 2px; }
+
+    /* ── Variable selector ── */
+    #var-panel {
+      background: #1e2333;
+      border: 1px solid #2d3552;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+    }
+    #var-panel h2 {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: #64748b;
+      margin: 0 0 0.5rem;
+    }
+    #var-checkboxes {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem 1.2rem;
+    }
+    .var-cb { display: flex; align-items: center; gap: 0.3rem; font-size: 0.82rem; cursor: pointer; }
+    .var-cb input[type="checkbox"] { accent-color: #2563eb; }
+    .var-cb .suffix { color: #64748b; font-size: 0.72rem; }
+    .var-cb .src-badge {
+      font-size: 0.65rem;
+      padding: 0 4px;
+      border-radius: 3px;
+      font-weight: 600;
+      letter-spacing: .03em;
+    }
+    .src-badge.ndfd     { background: #14532d; color: #4ade80; }
+    .src-badge.nbm      { background: #1e3a5f; color: #60a5fa; }
+    .src-badge.blend    { background: #3b1f5e; color: #c084fc; }
+    .src-badge.derived  { background: #3b2900; color: #fbbf24; }
+
+    /* ── Charts ── */
+    #charts { display: flex; flex-direction: column; gap: 1rem; }
+
+    .chart-card {
+      background: #1e2333;
+      border: 1px solid #2d3552;
+      border-radius: 8px;
+      padding: 0.75rem 1rem 0.5rem;
+    }
+    .chart-card h3 {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #93c5fd;
+      margin: 0 0 0.5rem;
+    }
+    .chart-wrap { position: relative; height: 180px; }
+
+    /* ── Spinner ── */
+    #spinner {
+      display: none;
+      width: 18px; height: 18px;
+      border: 2px solid #374151;
+      border-top-color: #2563eb;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      align-self: center;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<h1>Blend Forecast Review</h1>
+
+<!-- Controls -->
+<div id="controls">
+  <div class="field">
+    <label>Latitude</label>
+    <input type="number" id="inp-lat" value="43.07" step="0.01" min="-90" max="90" />
+  </div>
+  <div class="field">
+    <label>Longitude</label>
+    <input type="number" id="inp-lon" value="-89.41" step="0.01" min="-180" max="180" />
+  </div>
+  <div class="field">
+    <label>Start (optional)</label>
+    <input type="text" id="inp-start" placeholder="2026-01-01T06:00Z" />
+  </div>
+  <div class="field">
+    <label>End (optional)</label>
+    <input type="text" id="inp-end" placeholder="2026-01-08T00:00Z" />
+  </div>
+  <button id="btn-fetch">Fetch Forecast</button>
+  <div id="spinner"></div>
+</div>
+
+<div id="status-bar">Loading variable list…</div>
+
+<!-- Source legend -->
+<div id="legend">
+  <div class="legend-item">
+    <div class="legend-swatch" style="background:#4ade80;"></div>
+    <span>NDFD</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-swatch" style="background:#60a5fa;"></div>
+    <span>NBM</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-swatch" style="background:#fbbf24;"></div>
+    <span>Derived</span>
+  </div>
+</div>
+
+<!-- Variable selector (populated after /variables call) -->
+<div id="var-panel" style="display:none;">
+  <h2>Variables to plot</h2>
+  <div id="var-checkboxes"></div>
+</div>
+
+<!-- Chart area -->
+<div id="charts"></div>
+
+<script>
+// Blend API base — always /blend on this host.
+const API = window.location.origin + "/" + window.location.pathname.split("/")[1];
+
+// Source colours
+const SRC_COLOR = {
+  ndfd:    "#4ade80",
+  nbm:     "#60a5fa",
+  derived: "#fbbf24",
+};
+
+Chart.defaults.color = "#94a3b8";
+Chart.defaults.borderColor = "#2d3552";
+
+let varRegistry  = {};    // name → BlendVariableInfo
+let chartInstances = {};  // varName → Chart
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function setStatus(msg, cls = "") {
+  const el = document.getElementById("status-bar");
+  el.textContent = msg;
+  el.className = cls;
+}
+
+function setLoading(on) {
+  document.getElementById("btn-fetch").disabled = on;
+  document.getElementById("spinner").style.display = on ? "block" : "none";
+}
+
+function formatAxisDate(isoStr) {
+  const d = new Date(isoStr);
+  const mo = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dy = String(d.getUTCDate()).padStart(2, "0");
+  const hr = String(d.getUTCHours()).padStart(2, "0");
+  return `${mo}/${dy} ${hr}Z`;
+}
+
+// ── Load /variables ───────────────────────────────────────────────────────────
+
+async function loadVariables() {
+  try {
+    const r = await fetch(`${API}/variables`);
+    if (!r.ok) throw new Error(`/variables returned ${r.status}`);
+    const body = await r.json();
+    varRegistry = body.variables || {};
+    buildCheckboxes();
+    setStatus(`Registry loaded — ${Object.keys(varRegistry).length} variables available.`, "ok");
+    document.getElementById("var-panel").style.display = "";
+  } catch (e) {
+    setStatus(`Error loading variables: ${e.message}`, "error");
+  }
+}
+
+const DEFAULT_CHECKED = new Set([
+  "temperature", "apparent_temperature", "dewpoint",
+  "wind_speed", "wind_gust", "wind_direction",
+  "relative_humidity", "cloud_cover",
+  "total_precipitation", "precip_type",
+  "thunderstorm_probability", "sun_elevation",
+]);
+
+function badgeHTML(sources) {
+  if (!sources || !sources.length) return "";
+  if (sources.length > 1) return `<span class="src-badge blend">blend</span>`;
+  return `<span class="src-badge ${sources[0]}">${sources[0].toUpperCase()}</span>`;
+}
+
+function buildCheckboxes() {
+  const container = document.getElementById("var-checkboxes");
+  container.innerHTML = "";
+  for (const [name, info] of Object.entries(varRegistry)) {
+    const suffix  = info.response_key_suffix ?? info.units ?? "";
+    const checked = DEFAULT_CHECKED.has(name) ? "checked" : "";
+    const badge   = badgeHTML(info.sources);
+    const lbl = document.createElement("label");
+    lbl.className = "var-cb";
+    lbl.innerHTML = `
+      <input type="checkbox" value="${name}" ${checked} />
+      ${name} <span class="suffix">${suffix}</span>${badge}
+    `;
+    container.appendChild(lbl);
+  }
+}
+
+function selectedVars() {
+  return [...document.querySelectorAll("#var-checkboxes input:checked")]
+    .map(cb => cb.value);
+}
+
+// ── Fetch & render ────────────────────────────────────────────────────────────
+
+async function fetchAndRender() {
+  const lat   = parseFloat(document.getElementById("inp-lat").value);
+  const lon   = parseFloat(document.getElementById("inp-lon").value);
+  const start = document.getElementById("inp-start").value.trim();
+  const end   = document.getElementById("inp-end").value.trim();
+  const vars  = selectedVars();
+
+  if (!vars.length) { setStatus("Select at least one variable.", "error"); return; }
+  if (isNaN(lat) || isNaN(lon)) { setStatus("Enter valid lat/lon.", "error"); return; }
+
+  const params = new URLSearchParams({ lat, lon, vars: vars.join(",") });
+  if (start) params.set("start", start);
+  if (end)   params.set("end",   end);
+
+  setLoading(true);
+  setStatus("Fetching forecast…");
+
+  try {
+    const r = await fetch(`${API}/forecast?${params}`);
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`/forecast returned ${r.status}: ${txt}`);
+    }
+    const body = await r.json();
+    renderCharts(body, vars);
+    document.getElementById("legend").style.display = "flex";
+    setStatus(
+      `NBM: ${body.nbm_runtime}  |  NDFD: ${body.ndfd_runtime}  |  ` +
+      `Grid: ${body.latitude}°N, ${body.longitude}°E  |  ${body.length} steps`,
+      "ok"
+    );
+  } catch (e) {
+    setStatus(`Fetch error: ${e.message}`, "error");
+  } finally {
+    setLoading(false);
+  }
+}
+
+// ── Chart rendering ───────────────────────────────────────────────────────────
+
+function renderCharts(body, requestedVars) {
+  const container = document.getElementById("charts");
+
+  // Remove charts for deselected variables
+  for (const [name, ch] of Object.entries(chartInstances)) {
+    if (!requestedVars.includes(name)) {
+      ch.destroy();
+      delete chartInstances[name];
+      const card = document.getElementById(`card-${name}`);
+      if (card) card.remove();
+    }
+  }
+
+  const times = body.times;
+
+  requestedVars.forEach(varName => {
+    const info   = varRegistry[varName] ?? {};
+    const suffix = info.response_key_suffix ?? "";
+    const key    = suffix ? `${varName}_${suffix}` : varName;
+    const values = body[key];
+    if (!values) return;
+
+    const sourceKey = `${varName}_source`;
+    const sources   = body[sourceKey] ?? null;
+
+    const datasets = buildDatasets(times, values, sources, info.sources ?? []);
+
+    const cardId = `card-${varName}`;
+    let card = document.getElementById(cardId);
+    if (!card) {
+      card = document.createElement("div");
+      card.id = cardId;
+      card.className = "chart-card";
+      card.innerHTML = `<h3>${key}</h3><div class="chart-wrap"><canvas></canvas></div>`;
+      container.appendChild(card);
+    }
+
+    const canvas = card.querySelector("canvas");
+
+    const is360  = varName === "wind_direction";
+    const nonNull = values.filter(v => v !== null);
+    const yMin = is360 ? 0 : nonNull.length && Math.min(...nonNull) >= 0 ? 0 : undefined;
+    const yMax = is360 ? 360 : undefined;
+
+    if (chartInstances[varName]) {
+      const ch = chartInstances[varName];
+      ch.data.labels   = times.map(formatAxisDate);
+      ch.data.datasets = datasets;
+      ch.options.scales.y.min = yMin;
+      ch.options.scales.y.max = yMax;
+      ch.update("none");
+    } else {
+      chartInstances[varName] = new Chart(canvas, {
+        type: "line",
+        data: { labels: times.map(formatAxisDate), datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          plugins: {
+            legend: { display: datasets.length > 1 },
+            tooltip: {
+              mode: "index",
+              intersect: false,
+              callbacks: {
+                label: ctx => {
+                  const v = ctx.parsed.y;
+                  return `${ctx.dataset.label}: ${v !== null ? v : "—"}`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: { maxTicksLimit: 12, maxRotation: 0, font: { size: 10 } },
+              grid: { color: "#1e2a40" },
+            },
+            y: {
+              min: yMin,
+              max: yMax,
+              ticks: { font: { size: 10 } },
+              grid: { color: "#1e2a40" },
+            },
+          },
+          elements: {
+            point: { radius: 0, hoverRadius: 4 },
+            line:  { borderWidth: 1.5, tension: 0.2 },
+          },
+        },
+      });
+    }
+  });
+}
+
+// Build source-coloured datasets.
+// If the response includes a _source array, split into one dataset per source
+// (nulling out values that belong to a different source), so each source gets
+// its own colour.  Falls back to a single grey line if no source data.
+function buildDatasets(times, values, sources, declaredSources) {
+  if (!sources) {
+    // Single-source or derived variable — pick a colour from declaredSources
+    const src   = declaredSources[0] ?? "derived";
+    const color = SRC_COLOR[src] ?? "#94a3b8";
+    return [{
+      label: src.toUpperCase(),
+      data: values.map((v, i) => ({ x: formatAxisDate(times[i]), y: v })),
+      borderColor: color,
+      backgroundColor: color + "22",
+      fill: false,
+      spanGaps: false,
+    }];
+  }
+
+  // Collect unique source values present in the array
+  const presentSources = [...new Set(sources.filter(s => s !== null))];
+
+  return presentSources.map(src => {
+    const color = SRC_COLOR[src] ?? "#94a3b8";
+    // Keep a value only where it came from this source; null elsewhere.
+    // To draw continuous segments within a source block, also keep values
+    // adjacent to a null as null (Chart.js spanGaps: false handles the rest).
+    const data = values.map((v, i) => ({
+      x: formatAxisDate(times[i]),
+      y: sources[i] === src ? v : null,
+    }));
+    return {
+      label: src.toUpperCase(),
+      data,
+      borderColor: color,
+      backgroundColor: color + "22",
+      fill: false,
+      spanGaps: false,
+    };
+  });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+document.getElementById("btn-fetch").addEventListener("click", fetchAndRender);
+document.getElementById("controls").addEventListener("keydown", e => {
+  if (e.key === "Enter") fetchAndRender();
+});
+
+loadVariables();
+</script>
+</body>
+</html>
