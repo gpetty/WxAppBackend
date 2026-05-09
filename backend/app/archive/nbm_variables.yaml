@@ -1,0 +1,5 @@
+variables:
+  - temperature
+  - dewpoint
+  - wind_speed
+  - wind_direction

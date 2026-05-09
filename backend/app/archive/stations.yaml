@@ -1,0 +1,25 @@
+stations:
+  - id: KMSN
+    lat: 43.14
+    lon: -89.34
+    description: Madison, WI
+  - id: KSAN
+    lat: 32.73
+    lon: -117.19
+    description: San Diego, CA
+  - id: KTUS
+    lat: 32.11
+    lon: -110.94
+    description: Tucson, AZ
+  - id: KDEN
+    lat: 39.86
+    lon: -104.67
+    description: Denver, CO
+  - id: KMIA
+    lat: 25.80
+    lon: -80.30
+    description: Miami, FL
+  - id: KBUF
+    lat: 42.94
+    lon: -78.73
+    description: Buffalo, NY

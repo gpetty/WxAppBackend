@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -34,6 +34,7 @@ from .config_ndfd import NDFD_SLAB_STORE_DIR, NDFD_VARIABLES_YAML
 from .registry import VariableRegistry
 from .store.nbm_store import NBMStore
 from .store.ndfd_store import NDFDStore
+from .archive import archive_nbm_sweep, archive_ndfd_sweep
 from .routers import blend_forecast, blend_status, blend_variables
 
 log = logging.getLogger(__name__)
@@ -164,7 +165,7 @@ def review_page():
 # ---------------------------------------------------------------------------
 
 @app.post("/admin/reload", include_in_schema=False)
-def admin_reload(request: Request):
+def admin_reload(request: Request, background_tasks: BackgroundTasks):
     """
     Reload both slab stores from disk.
 
@@ -201,6 +202,11 @@ def admin_reload(request: Request):
 
     state.last_loaded = datetime.now(tz=timezone.utc)
     log.info(f"Blend reload — NBM changed: {nbm_changed}, NDFD changed: {ndfd_changed}")
+
+    if nbm_changed:
+        background_tasks.add_task(archive_nbm_sweep, state)
+    if ndfd_changed:
+        background_tasks.add_task(archive_ndfd_sweep, state)
 
     return {
         "status":       "ok",
