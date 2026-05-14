@@ -15,21 +15,30 @@ Or via CLI:
 
 from __future__ import annotations
 
-import json
 import logging
-import shutil
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+import s3fs
 from herbie import Herbie
 
 from ..config import (
-    DATA_ROOT, STAGING_DIR, LOCK_FILE,
+    DATA_ROOT, STAGING_DIR, LOCK_FILE, SLAB_STORE_DIR,
     NBM_MODEL, NBM_PRODUCT, DOWNLOAD_WORKERS,
+    NBM_FXX_MAX, CYCLE_TAG_FMT,
+    MAX_RETRIES, RETRY_DELAY_SEC, TRANSIENT_RETRY_DELAY_SEC,
 )
+from ._common import (
+    IngestLock, LockError, cycle_tag_in_ring_buffer, dump_manifest, read_manifest,
+)
+
+# Anonymous-access S3 client reused across retry passes and the file-listing
+# call (constructing a fresh client per call discards its connection cache).
+_S3FS = s3fs.S3FileSystem(anon=True)
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +47,7 @@ log = logging.getLogger(__name__)
 # NBM forecast hour schedule
 # ---------------------------------------------------------------------------
 
-def nbm_forecast_hours(fxx_max: int = 260) -> list[int]:
+def nbm_forecast_hours(fxx_max: int = NBM_FXX_MAX) -> list[int]:
     """
     Fallback fxx schedule used when the S3 directory listing is unavailable.
 
@@ -71,9 +80,6 @@ def list_available_fxx(
 
     Falls back to ``nbm_forecast_hours()`` if the S3 listing fails.
     """
-    import re
-    import s3fs
-
     bucket_path = (
         f"noaa-nbm-grib2-pds/blend.{cycle_time:%Y%m%d}/{cycle_time:%H}/core"
     )
@@ -82,8 +88,7 @@ def list_available_fxx(
     )
 
     try:
-        fs = s3fs.S3FileSystem(anon=True)
-        files = fs.ls(bucket_path)
+        files = _S3FS.ls(bucket_path)
         fxx_list = []
         for f in files:
             m = pattern.search(f)
@@ -199,53 +204,6 @@ def find_latest_cycle(max_lookback_hours: int = 24) -> Optional[datetime]:
 
 
 # ---------------------------------------------------------------------------
-# Lock file (simple PID-based; prevents overlapping cron runs)
-# ---------------------------------------------------------------------------
-
-class LockError(RuntimeError):
-    pass
-
-
-class IngestLock:
-    """Context manager that creates/removes a lock file."""
-
-    def __init__(self, lock_path: Path) -> None:
-        self.path = lock_path
-
-    def __enter__(self) -> "IngestLock":
-        import os
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
-            pid_str = self.path.read_text().strip()
-            stale = False
-            try:
-                pid = int(pid_str)
-                os.kill(pid, 0)   # signal 0: check existence only, no-op if running
-            except (ValueError, ProcessLookupError):
-                stale = True      # PID is gone
-            except PermissionError:
-                stale = False     # process exists but owned by another user — treat as live
-            if stale:
-                log.warning(f"Removing stale lock file (PID {pid_str} no longer running).")
-                self.path.unlink()
-            else:
-                raise LockError(
-                    f"Lock file exists ({self.path}). "
-                    f"Ingestion already running as PID {pid_str}."
-                )
-        self.path.write_text(str(os.getpid()))
-        log.debug(f"Lock acquired: {self.path}")
-        return self
-
-    def __exit__(self, *_) -> None:
-        try:
-            self.path.unlink()
-            log.debug(f"Lock released: {self.path}")
-        except FileNotFoundError:
-            pass
-
-
-# ---------------------------------------------------------------------------
 # Single-file download
 # ---------------------------------------------------------------------------
 
@@ -332,28 +290,29 @@ def _download_batch(
 def download_cycle(
     cycle_time: datetime,
     staging_dir: Path,
-    fxx_max: int = 260,
+    fxx_max: int = NBM_FXX_MAX,
     workers: int = DOWNLOAD_WORKERS,
     dry_run: bool = False,
-    max_retries: int = 5,
-    retry_delay: int = 300,
+    max_retries: int = MAX_RETRIES,
+    retry_delay: int = RETRY_DELAY_SEC,
+    transient_retry_delay: int = TRANSIENT_RETRY_DELAY_SEC,
 ) -> dict[int, Path]:
     """
     Download all forecast hours for cycle_time into staging_dir.
 
     On each pass the function queries the S3 directory listing to learn which
-    files exist, then downloads only those not yet retrieved.  This eliminates
-    spurious "file not found" warnings for fxx values that do not exist on S3.
+    files exist, then downloads only those not yet retrieved.
 
-    Passes continue (up to max_retries) for two distinct reasons:
+    Passes continue (up to max_retries) for two distinct reasons, each with
+    its own inter-pass delay:
 
-      1. Extended-range files (fxx > 36) are posted to S3 progressively,
-         typically 30–90 min after the hourly segment.  Re-listing S3 on each
-         pass discovers newly-arrived files that weren't there on the previous
-         pass.
-      2. Transient download failures are retried automatically: a failed fxx
-         stays absent from ``results`` and is re-attempted the next time it
-         appears in the S3 listing.
+      1. Polling: extended-range files (fxx > 36) are posted to S3 progressively,
+         typically 30-90 min after the hourly segment.  When the S3 listing
+         is still missing expected files, the next pass waits ``retry_delay``
+         seconds (default 300s = 5 min).
+      2. Transient retry: a file is on S3 but its download failed.  When the
+         S3 listing is complete and only transient download failures remain,
+         the next pass waits ``transient_retry_delay`` seconds (default 30s).
 
     Raises RuntimeError only if a file confirmed present on S3 still cannot be
     downloaded after all retries.  Expected files that never appear on S3 are
@@ -361,7 +320,6 @@ def download_cycle(
 
     Returns a dict mapping fxx → local file path for every successful download.
     """
-    # Target set: S3 schedule thinned to standard valid-time boundaries.
     expected = set(thin_fxx(cycle_time, list(range(1, fxx_max + 1))))
     staging_dir.mkdir(parents=True, exist_ok=True)
 
@@ -378,14 +336,6 @@ def download_cycle(
     download_failures: list[int] = []
 
     for attempt in range(max_retries + 1):
-        if attempt > 0:
-            log.info(
-                f"Pass {attempt + 1}/{max_retries + 1}: waiting {retry_delay}s "
-                f"(polling for extended-range files and retrying failures)..."
-            )
-            time.sleep(retry_delay)
-
-        # Fresh S3 listing thinned to standard valid-time boundaries.
         available_raw = list_available_fxx(cycle_time, fxx_max=fxx_max)
         available = thin_fxx(cycle_time, available_raw)
         to_download = [f for f in available if f not in results]
@@ -404,24 +354,36 @@ def download_cycle(
         else:
             download_failures = []
 
-        # Early exit: nothing left to fetch from the current S3 listing and no failures.
-        remaining = [f for f in available if f not in results]
-        if not remaining and not download_failures:
+        # Done when nothing's left to fetch and nothing failed.
+        missing_from_s3 = expected - set(available)
+        if not missing_from_s3 and not download_failures:
             log.info("All S3-listed files retrieved.")
             break
+
+        if attempt == max_retries:
+            break  # exhausted retries; reporting handled below
+
+        # Pick delay: long if we're polling for late-arriving files; short if
+        # the S3 listing is complete and we're just retrying transient errors.
+        if missing_from_s3:
+            delay = retry_delay
+            reason = f"polling — {len(missing_from_s3)} expected fxx not yet on S3"
+        else:
+            delay = transient_retry_delay
+            reason = f"transient retry — {len(download_failures)} failed downloads"
+        log.info(f"Pass {attempt + 2}/{max_retries + 1}: waiting {delay}s ({reason})...")
+        time.sleep(delay)
 
     elapsed = time.monotonic() - t0
     log.info(f"Download complete: {len(results)}/{len(expected)} expected files "
              f"in {elapsed:.0f}s")
 
-    # Raise only for confirmed S3 files that still couldn't be downloaded.
     if download_failures:
         raise RuntimeError(
             f"{len(download_failures)} files still failing after {max_retries} retries: "
             f"fxx={sorted(download_failures)}"
         )
 
-    # Warn about expected files that never appeared on S3 (schedule can vary).
     missing = expected - set(results)
     if missing:
         log.warning(
@@ -442,26 +404,15 @@ def write_manifest(
     files: dict[int, Path],
 ) -> Path:
     """Write a JSON manifest recording the cycle and downloaded file paths."""
-    manifest = {
+    return dump_manifest(staging_dir, {
+        "source":      "nbm",
         "cycle":       cycle_time.strftime("%Y-%m-%dT%H:00:00Z"),
         "downloaded":  datetime.now(tz=timezone.utc).isoformat(),
         "file_count":  len(files),
         "files": {
             fxx: str(path) for fxx, path in sorted(files.items())
         },
-    }
-    path = staging_dir / "manifest.json"
-    path.write_text(json.dumps(manifest, indent=2))
-    log.info(f"Manifest written: {path}")
-    return path
-
-
-def read_manifest(staging_dir: Path) -> Optional[dict]:
-    """Read the manifest from a staging directory. Returns None if not found."""
-    path = staging_dir / "manifest.json"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text())
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -469,14 +420,14 @@ def read_manifest(staging_dir: Path) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def run_ingestion(
-    fxx_max: int = 260,
+    fxx_max: int = NBM_FXX_MAX,
     workers: int = DOWNLOAD_WORKERS,
     dry_run: bool = False,
     force: bool = False,
     postprocess: bool = False,
     keep_staging: bool = False,
-    max_retries: int = 5,
-    retry_delay: int = 300,
+    max_retries: int = MAX_RETRIES,
+    retry_delay: int = RETRY_DELAY_SEC,
 ) -> Path:
     """
     Run a full ingestion cycle:
@@ -501,18 +452,30 @@ def run_ingestion(
     """
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
-    with IngestLock(LOCK_FILE):
+    # Lazy import — keeps the postprocessor (heavy cfgrib chain) out of the
+    # module-import path for callers that only need cycle discovery.
+    from ..postprocessor.slab_ingest import run_slab_ingest
+
+    with IngestLock(LOCK_FILE, service_name="NBM ingestion"):
 
         # --- Find cycle ---
         log.info("Searching for latest NBM cycle...")
         cycle_time = find_latest_cycle()
         if cycle_time is None:
-            raise RuntimeError("No NBM cycle found on S3 in the last 12 hours.")
+            raise RuntimeError("No NBM cycle found on S3 in the last 24 hours.")
 
-        cycle_tag = cycle_time.strftime("%Y%m%d_%H")
+        cycle_tag = cycle_time.strftime(CYCLE_TAG_FMT)
         cycle_staging = STAGING_DIR / cycle_tag
 
-        # --- Skip if already complete ---
+        # --- Skip if cycle already in ring buffer (staging may have been pruned) ---
+        if not force and cycle_tag_in_ring_buffer(cycle_tag, SLAB_STORE_DIR):
+            log.info(
+                f"Cycle {cycle_tag} already in slab ring buffer. Nothing to do. "
+                f"Use --force to re-download and re-process."
+            )
+            return cycle_staging
+
+        # --- Skip download (but optionally re-postprocess) if already staged ---
         manifest = read_manifest(cycle_staging)
         if manifest and not force:
             log.info(
@@ -523,7 +486,6 @@ def run_ingestion(
             # Still allow post-processing of an already-staged cycle
             if postprocess:
                 log.info("Running slab ingest on existing staged cycle...")
-                from ..postprocessor.slab_ingest import run_slab_ingest
                 stats = run_slab_ingest(
                     staging_dir=cycle_staging,
                     cycle_tag=cycle_tag,
@@ -552,7 +514,6 @@ def run_ingestion(
         # --- Post-process ---
         if postprocess and not dry_run:
             log.info("Starting slab ingest (GRIB2 → slab ring buffer)...")
-            from ..postprocessor.slab_ingest import run_slab_ingest
             stats = run_slab_ingest(
                 staging_dir=cycle_staging,
                 cycle_tag=cycle_tag,

@@ -16,20 +16,12 @@ import argparse
 import logging
 import sys
 
-from ..config import STAGING_DIR, DATA_ROOT
+from ..config import (
+    DATA_ROOT, STAGING_DIR,
+    DOWNLOAD_WORKERS, MAX_RETRIES, NBM_FXX_MAX, RETRY_DELAY_SEC,
+)
+from ._common import setup_logging
 from .ingest import LockError, run_ingestion, read_manifest
-
-
-def setup_logging(verbose: bool = False) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s  %(levelname)-8s  %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    # Suppress noisy third-party loggers
-    for noisy in ("herbie", "urllib3", "requests", "boto3", "botocore", "s3transfer"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def cmd_status() -> None:
@@ -61,13 +53,13 @@ def main() -> None:
         description="Download the latest NBM CONUS forecast cycle.",
     )
     parser.add_argument(
-        "--fxx-max", type=int, default=260, metavar="N",
-        help="Download forecast hours 1 through N (default: 260 = full cycle). "
+        "--fxx-max", type=int, default=NBM_FXX_MAX, metavar="N",
+        help=f"Download forecast hours 1 through N (default: {NBM_FXX_MAX} = full cycle). "
              "Use 36 for a fast ~900 MB test run.",
     )
     parser.add_argument(
-        "--workers", type=int, default=6, metavar="N",
-        help="Parallel download workers (default: 6).",
+        "--workers", type=int, default=DOWNLOAD_WORKERS, metavar="N",
+        help=f"Parallel download workers (default: {DOWNLOAD_WORKERS}).",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -88,13 +80,13 @@ def main() -> None:
              "Zarr conversion (useful for debugging).",
     )
     parser.add_argument(
-        "--max-retries", type=int, default=5, metavar="N",
-        help="Retry failed files up to N times (default: 5). "
+        "--max-retries", type=int, default=MAX_RETRIES, metavar="N",
+        help=f"Retry failed files up to N times (default: {MAX_RETRIES}). "
              "Each retry waits --retry-delay seconds.",
     )
     parser.add_argument(
-        "--retry-delay", type=int, default=300, metavar="SEC",
-        help="Seconds to wait between retry attempts (default: 300 = 5 min).",
+        "--retry-delay", type=int, default=RETRY_DELAY_SEC, metavar="SEC",
+        help=f"Seconds to wait between retry attempts (default: {RETRY_DELAY_SEC} = 5 min).",
     )
     parser.add_argument(
         "--status", action="store_true",

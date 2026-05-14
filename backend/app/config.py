@@ -29,6 +29,23 @@ VARIABLES_YAML: Path = Path(__file__).parent / "variables.yaml"
 NBM_MODEL:   str = "nbm"
 NBM_PRODUCT: str = "co"       # CONUS domain
 
+# Maximum forecast hour to download for a full NBM cycle.
+# Matches the upper bound of the 6-hourly extended-range segment (f001..f260).
+NBM_FXX_MAX: int = 260
+
+# Cycle tag format used in directory names and ring-buffer keys.
+# Shared by NBM and NDFD ingest.
+CYCLE_TAG_FMT: str = "%Y%m%d_%H"
+
+# Download retry policy
+MAX_RETRIES: int = 5
+# Long delay between passes when we're still waiting for expected fxx files to
+# appear on S3 (extended-range files post progressively, ~30-90 min after cycle).
+RETRY_DELAY_SEC: int = 300
+# Short delay for retrying transient download failures (file is on S3 but the
+# download itself failed) — no need to wait a full polling cycle.
+TRANSIENT_RETRY_DELAY_SEC: int = 30
+
 # Download concurrency (parallel workers for GRIB2 file downloads)
 DOWNLOAD_WORKERS: int = int(os.environ.get("DOWNLOAD_WORKERS", 6))
 

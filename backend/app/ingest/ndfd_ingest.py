@@ -26,9 +26,7 @@ Or via CLI:
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -39,57 +37,15 @@ from typing import Optional
 import eccodes
 import s3fs
 
+from ..config import CYCLE_TAG_FMT
 from ..config_ndfd import (
     NDFD_BUCKET, NDFD_PREFIX, NDFD_PERIODS, NDFD_ELEMENTS,
     NDFD_INCOMING_DIR, NDFD_STAGING_DIR, NDFD_LOCK_FILE,
     NDFD_DATA_ROOT, NDFD_DOWNLOAD_WORKERS,
 )
+from ._common import IngestLock, LockError, cycle_tag_in_ring_buffer, dump_manifest, setup_logging
 
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Lock file  (re-uses same pattern as ingest.py)
-# ---------------------------------------------------------------------------
-
-class LockError(RuntimeError):
-    pass
-
-
-class IngestLock:
-    def __init__(self, lock_path: Path) -> None:
-        self.path = lock_path
-
-    def __enter__(self) -> "IngestLock":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
-            pid_str = self.path.read_text().strip()
-            stale = False
-            try:
-                pid = int(pid_str)
-                os.kill(pid, 0)
-            except (ValueError, ProcessLookupError):
-                stale = True
-            except PermissionError:
-                stale = False
-            if stale:
-                log.warning(f"Removing stale lock file (PID {pid_str} no longer running).")
-                self.path.unlink()
-            else:
-                raise LockError(
-                    f"Lock file exists ({self.path}). "
-                    f"NDFD ingestion already running as PID {pid_str}."
-                )
-        self.path.write_text(str(os.getpid()))
-        log.debug(f"Lock acquired: {self.path}")
-        return self
-
-    def __exit__(self, *_) -> None:
-        try:
-            self.path.unlink()
-            log.debug(f"Lock released: {self.path}")
-        except FileNotFoundError:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -224,11 +180,11 @@ def read_grib2_reference_time(path: Path) -> Optional[datetime]:
         if msg is None:
             return None
         try:
-            date = eccodes.codes_get(msg, "dataDate")   # YYYYMMDD int
-            time = eccodes.codes_get(msg, "dataTime")   # HHMM int (e.g. 2330)
+            date = eccodes.codes_get(msg, "dataDate")        # YYYYMMDD int
+            data_time = eccodes.codes_get(msg, "dataTime")   # HHMM int (e.g. 2330)
             d = str(date)
-            hour   = int(time) // 100
-            minute = int(time) % 100
+            hour   = int(data_time) // 100
+            minute = int(data_time) % 100
             return datetime(
                 int(d[:4]), int(d[4:6]), int(d[6:8]),
                 hour, minute, 0,
@@ -263,7 +219,7 @@ def determine_cycle_tag(incoming_dir: Path) -> Optional[str]:
     # Floor to hour (not round — avoids cross-hour false matches when
     # consecutive NDFD updates land on either side of :30)
     floored = ref_time.replace(minute=0, second=0, microsecond=0)
-    cycle_tag = floored.strftime("%Y%m%d_%H")
+    cycle_tag = floored.strftime(CYCLE_TAG_FMT)
     log.info(
         f"VP.001-003/ds.temp.bin reference time: {ref_time:%Y-%m-%dT%H:%MZ}  "
         f"→ cycle_tag: {cycle_tag}"
@@ -273,7 +229,7 @@ def determine_cycle_tag(incoming_dir: Path) -> Optional[str]:
 
 def cycle_time_iso(cycle_tag: str) -> str:
     """Convert "20260312_23" → "2026-03-12T23:00:00Z"."""
-    dt = datetime.strptime(cycle_tag, "%Y%m%d_%H")
+    dt = datetime.strptime(cycle_tag, CYCLE_TAG_FMT)
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -307,7 +263,7 @@ def write_manifest(
     results:     dict[tuple[str, str], Path],
 ) -> Path:
     """Write a JSON manifest recording the downloaded files."""
-    manifest = {
+    return dump_manifest(staging_dir, {
         "source":      "ndfd",
         "cycle_tag":   cycle_tag,
         "cycle_time":  cycle_time_iso(cycle_tag),
@@ -317,33 +273,7 @@ def write_manifest(
             f"{period}/{elem}": str(path)
             for (period, elem), path in sorted(results.items())
         },
-    }
-    path = staging_dir / "manifest.json"
-    path.write_text(json.dumps(manifest, indent=2))
-    log.info(f"Manifest written: {path}")
-    return path
-
-
-def read_manifest(staging_dir: Path) -> Optional[dict]:
-    path = staging_dir / "manifest.json"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text())
-
-
-# ---------------------------------------------------------------------------
-# Idempotency check against ring buffer
-# ---------------------------------------------------------------------------
-
-def cycle_tag_in_ring_buffer(cycle_tag: str, slab_store_dir: Path) -> bool:
-    """
-    Return True if *cycle_tag* is already committed to the NDFD ring buffer.
-    """
-    from ..store.ring_state import RingState
-    if not (slab_store_dir / "ring_state.json").exists():
-        return False
-    state = RingState.load(slab_store_dir)
-    return state.run_by_tag(cycle_tag) is not None
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +304,7 @@ def run_ndfd_ingestion(
     from ..config_ndfd import NDFD_SLAB_STORE_DIR
     NDFD_DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
-    with IngestLock(NDFD_LOCK_FILE):
+    with IngestLock(NDFD_LOCK_FILE, service_name="NDFD ingestion"):
 
         # --- Download ---
         log.info("Starting NDFD element download…")
@@ -437,16 +367,16 @@ def run_ndfd_ingestion(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main() -> None:
     import argparse
+    import sys
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+    parser = argparse.ArgumentParser(
+        prog="python -m backend.app.ingest.ndfd_ingest",
+        description="Download NDFD element files from S3.",
     )
-
-    parser = argparse.ArgumentParser(description="Download NDFD element files from S3.")
-    parser.add_argument("--workers",      type=int, default=NDFD_DOWNLOAD_WORKERS)
+    parser.add_argument("--workers",      type=int, default=NDFD_DOWNLOAD_WORKERS,
+                        help=f"Parallel download workers (default: {NDFD_DOWNLOAD_WORKERS}).")
     parser.add_argument("--dry-run",      action="store_true")
     parser.add_argument("--force",        action="store_true",
                         help="Re-download and re-process even if cycle_tag already in ring buffer.")
@@ -454,12 +384,30 @@ if __name__ == "__main__":
                         help="Run slab ingest after download.")
     parser.add_argument("--keep-staging", action="store_true",
                         help="Keep GRIB2 files after slab ingest (default: delete).")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Enable debug logging.")
     args = parser.parse_args()
 
-    run_ndfd_ingestion(
-        workers=args.workers,
-        dry_run=args.dry_run,
-        force=args.force,
-        postprocess=args.postprocess,
-        keep_staging=args.keep_staging,
-    )
+    setup_logging(args.verbose)
+
+    try:
+        run_ndfd_ingestion(
+            workers=args.workers,
+            dry_run=args.dry_run,
+            force=args.force,
+            postprocess=args.postprocess,
+            keep_staging=args.keep_staging,
+        )
+    except LockError as e:
+        log.error(str(e))
+        sys.exit(1)
+    except RuntimeError as e:
+        log.error(str(e))
+        sys.exit(1)
+    except KeyboardInterrupt:
+        log.warning("Interrupted by user.")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
