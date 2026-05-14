@@ -1,0 +1,23 @@
+# /etc/systemd/system/wxmetaringest.service
+#
+# Weather Window METAR Archive (oneshot; triggered by wxmetaringest.timer)
+# Fetches the most recent regular hourly METAR for each configured station
+# from the Aviation Weather Center API and appends it to a monthly JSONL file.
+#
+# Output: /12TB1/FCST_series/<station_id>/metar/<YYYY-MM>.jsonl
+#
+# Install:
+#   sudo cp systemd/wxmetaringest.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+
+[Unit]
+Description=Weather Window METAR Archive
+After=network.target
+
+[Service]
+Type=oneshot
+User=gpetty
+WorkingDirectory=/home/gpetty/WxApp
+ExecStart=/home/gpetty/WxApp/.venv/bin/python scripts/metar_archive.py
+StandardOutput=journal
+StandardError=journal

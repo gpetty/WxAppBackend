@@ -1,0 +1,24 @@
+# /etc/systemd/system/wxmetaringest.timer
+#
+# Weather Window METAR Archive — fires at :10 past each hour UTC.
+#
+# :10 UTC gives the AWC API time to receive and post the observation
+# (typically taken at :53Z, transmitted by :57Z, posted by :05Z).
+# RandomizedDelaySec adds up to 90s of jitter to avoid thundering-herd
+# if multiple timers fire at the same moment.
+#
+# Install:
+#   sudo cp systemd/wxmetaringest.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wxmetaringest.timer
+
+[Unit]
+Description=Weather Window METAR Archive — hourly at :10 UTC
+
+[Timer]
+OnCalendar=*-*-* *:10:00 UTC
+RandomizedDelaySec=90s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

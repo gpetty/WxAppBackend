@@ -61,12 +61,11 @@ def _load_ndfd_vars() -> list[str]:
 # JSONL helpers
 # ---------------------------------------------------------------------------
 
-def _last_cycle_tag(path: Path) -> Optional[str]:
-    """Return the cycle_tag of the last record in a JSONL file, or None."""
+def _last_record_field(path: Path, field: str) -> Optional[str]:
+    """Return `field` from the last record in a JSONL file, or None."""
     if not path.exists() or path.stat().st_size == 0:
         return None
     with open(path, "rb") as f:
-        # Seek backwards to find the last non-empty line
         f.seek(0, 2)
         end = f.tell()
         if end == 0:
@@ -75,6 +74,7 @@ def _last_cycle_tag(path: Path) -> Optional[str]:
         while pos > 0:
             f.seek(pos)
             ch = f.read(1)
+            # pos < end - 1 skips a sole trailing newline of the final line
             if ch == b"\n" and pos < end - 1:
                 break
             pos -= 1
@@ -82,7 +82,7 @@ def _last_cycle_tag(path: Path) -> Optional[str]:
     if not line:
         return None
     try:
-        return json.loads(line).get("cycle_tag")
+        return json.loads(line).get(field)
     except Exception:
         return None
 
@@ -146,7 +146,7 @@ def _run_sweep(
             out_path = ARCHIVE_ROOT / sid / source / f"{var}.jsonl"
 
             # Duplicate-cycle guard
-            if _last_cycle_tag(out_path) == cycle_tag:
+            if _last_record_field(out_path, "cycle_tag") == cycle_tag:
                 log.debug(f"Archive [{source}] {sid}/{var}: cycle {cycle_tag} already written, skipping")
                 continue
 
