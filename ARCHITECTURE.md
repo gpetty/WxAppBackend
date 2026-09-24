@@ -203,6 +203,8 @@ Runs every 20 minutes via `wxmonitor@{nbm,ndfd,blend}.timer`. Pings `GET /status
 
 The completeness check exists because freshness alone cannot see a truncated cycle — see *Incomplete cycles* above. Both checks are pure functions (`check_freshness()`, `check_completeness()`) covered by `tests/test_wxmonitor.py`.
 
+Each service pings its **own** healthchecks.io check (`WxApp NBM` / `WxApp NDFD` / `WxApp Blend`). They must never share a UUID: the timers are staggered, so a shared check lets one service's success ping clear another's failure ~20 min later, hiding a single-service outage. `duplicate_hc_uuids()` warns if they collide, and a test asserts they don't.
+
 ### METAR archive (`scripts/metar_archive.py`)
 
 Runs hourly at :10 past via `wxmetaringest.timer`. Downloads current METARs from the AWC Aviation Weather Center API for configured stations and appends to JSONL files in `/12TB1/METAR_archive/`. Intended as the "truth" counterpart to the forecast archive (see `backend/app/archive/ARCHIVE.md`).
@@ -338,7 +340,7 @@ The frontend stores each fetched forecast in IndexedDB tagged with fetch timesta
 
 ## Open Questions / Pending Decisions
 
-1. **healthchecks.io UUIDs.** All three monitors currently POST to the *same* check UUID in `scripts/wxmonitor.py`. Interleaved pings mean one service's failure can be cleared by another service's success ~20 min later, weakening the dead-man's switch. Give each service its own check.
+1. **healthchecks.io ping URLs are capability secrets, committed inline.** Each service now has its own check (`WxApp NBM` / `WxApp NDFD` / `WxApp Blend`, UUIDs in `scripts/wxmonitor.py`), but anyone holding a ping URL can POST a fake success and silence a real outage. Acceptable for a private repo on a single server. **If this repo is ever published, recreate all three checks and move the new UUIDs into an `EnvironmentFile=` read by the `wxmonitor@.service` unit** — the pattern `DATA_DIR` already uses — since rotating them after exposure means the old UUIDs stay in git history forever.
 
 2. **METAR archive systemd units** (`wxmetaringest.service` / `.timer`). Units exist in `systemd/` but have not yet been installed. Run:
    ```bash
