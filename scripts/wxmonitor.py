@@ -34,7 +34,11 @@ ALERT_EMAIL = "grantwp3@gmail.com"
 # ---------------------------------------------------------------------------
 # Service configuration
 # ---------------------------------------------------------------------------
-# Fill in HC_UUID for each service from your healthchecks.io dashboard.
+# Each service pings its OWN healthchecks.io check ("WxApp NBM",
+# "WxApp NDFD", "WxApp Blend"). They must not share a UUID: the timers are
+# staggered, so a shared check would let one service's success ping clear
+# another's failure ~20 min later, hiding a single-service outage.
+# duplicate_hc_uuids() guards this; tests/test_wxmonitor.py asserts it.
 # All three services use the same MAX_AGE_H (6h) after the NBM cadence
 # change to 3-hourly (matching NDFD).
 
@@ -49,7 +53,7 @@ ALERT_EMAIL = "grantwp3@gmail.com"
 SERVICE_CONFIGS: dict[str, dict] = {
     "nbm": {
         "status_url":      "http://127.0.0.1:8001/status",
-        "hc_uuid":         "1ffbadd7-5c6b-4217-a709-b272eec6476f",
+        "hc_uuid":         "1ffbadd7-5c6b-4217-a709-b272eec6476f",   # "WxApp NBM"
         "max_age_h":       6.0,
         "runtime_field":   "runtime",                  # field in /status response
         "min_time_steps":  90,                         # full cycle = 99
@@ -57,7 +61,7 @@ SERVICE_CONFIGS: dict[str, dict] = {
     },
     "ndfd": {
         "status_url":      "http://127.0.0.1:8002/status",
-        "hc_uuid":         "1ffbadd7-5c6b-4217-a709-b272eec6476f",
+        "hc_uuid":         "8dcf3734-0b98-4be2-b60a-36c5c07024e5",   # "WxApp NDFD"
         "max_age_h":       6.0,
         "runtime_field":   "runtime",
         "min_time_steps":  50,                         # normal range 59–65
@@ -65,7 +69,7 @@ SERVICE_CONFIGS: dict[str, dict] = {
     },
     "blend": {
         "status_url":      "http://127.0.0.1:8004/status",
-        "hc_uuid":         "1ffbadd7-5c6b-4217-a709-b272eec6476f",
+        "hc_uuid":         "5fdd4704-b114-44f5-8db8-30e93bef71cc",   # "WxApp Blend"
         "max_age_h":       6.0,
         # Blend /status has separate nbm_runtime and ndfd_runtime.
         # We check the older of the two; either stale means the blend is stale.
@@ -157,6 +161,17 @@ def check_freshness(
     return None
 
 
+def duplicate_hc_uuids(configs: dict[str, dict]) -> dict[str, list[str]]:
+    """
+    Return {hc_uuid: [service, ...]} for any UUID used by more than one
+    service. Empty dict means every service has its own check.
+    """
+    by_uuid: dict[str, list[str]] = {}
+    for service, cfg in configs.items():
+        by_uuid.setdefault(cfg["hc_uuid"], []).append(service)
+    return {u: s for u, s in by_uuid.items() if len(s) > 1}
+
+
 def check_completeness(status: dict, min_time_steps: int | None) -> str | None:
     """
     Fail if the committed cycle has fewer than *min_time_steps* forecast
@@ -190,6 +205,12 @@ def main() -> None:
 
     service = sys.argv[1]
     cfg     = SERVICE_CONFIGS[service]
+
+    # Warn (don't exit) if checks are shared — a misconfigured dead-man's
+    # switch is worth flagging, but refusing to monitor would be worse.
+    for uuid, shared_by in duplicate_hc_uuids(SERVICE_CONFIGS).items():
+        _log(f"WARNING: healthchecks.io check {uuid} is shared by "
+             f"{', '.join(sorted(shared_by))} — failures can cancel out.")
 
     label          = cfg["label"]
     status_url     = cfg["status_url"]

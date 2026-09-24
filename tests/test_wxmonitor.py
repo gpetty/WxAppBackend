@@ -108,3 +108,30 @@ def test_missing_step_count_is_reported_when_minimum_configured():
 
 def test_step_count_at_threshold_passes():
     assert wxmonitor.check_completeness(_status(n_time_steps=90), 90) is None
+
+
+# ---------------------------------------------------------------------------
+# healthchecks.io configuration
+# ---------------------------------------------------------------------------
+
+def test_each_service_has_a_distinct_hc_uuid():
+    """
+    All three services once shared one check UUID. Because the timers are
+    staggered, one service's failure ping was cleared by another service's
+    success ping ~20 min later, so a single-service outage could hide.
+    """
+    assert wxmonitor.duplicate_hc_uuids(wxmonitor.SERVICE_CONFIGS) == {}
+
+
+def test_duplicate_hc_uuids_reports_the_colliding_services():
+    configs = {
+        "a": {"hc_uuid": "shared"},
+        "b": {"hc_uuid": "shared"},
+        "c": {"hc_uuid": "unique"},
+    }
+    assert wxmonitor.duplicate_hc_uuids(configs) == {"shared": ["a", "b"]}
+
+
+def test_duplicate_hc_uuids_empty_when_all_distinct():
+    configs = {"a": {"hc_uuid": "x"}, "b": {"hc_uuid": "y"}}
+    assert wxmonitor.duplicate_hc_uuids(configs) == {}
