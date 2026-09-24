@@ -9,6 +9,7 @@
 | `wxblendapi` | 8004 | Blend API (gunicorn) |
 | `wxingest` | — | NBM ingest (oneshot) |
 | `wxndfdingest` | — | NDFD ingest (oneshot) |
+| `wxmetaringest` | — | METAR archive (oneshot, hourly at :10) |
 
 ---
 
@@ -39,12 +40,14 @@ Triggers the full ingest pipeline (download + postprocess + API reload), same as
 ```bash
 sudo systemctl start wxingest        # NBM
 sudo systemctl start wxndfdingest    # NDFD
+sudo systemctl start wxmetaringest   # METAR archive (one pass)
 ```
 
 Watch progress:
 ```bash
 journalctl -f -u wxingest
 journalctl -f -u wxndfdingest
+journalctl -f -u wxmetaringest
 ```
 
 Force re-download of the current cycle (bypasses idempotency check):
@@ -63,15 +66,16 @@ NDFD_DATA_DIR=/12TB2/NDFD AWS_NO_SIGN_REQUEST=yes \
 
 ```bash
 # One-line status for all wx services
-systemctl status wxapi wxndfdapi wxblendapi wxingest wxndfdingest
+systemctl status wxapi wxndfdapi wxblendapi wxingest wxndfdingest wxmetaringest
 
 # Recent logs
 journalctl -u wxapi -n 50
 journalctl -u wxndfdapi -n 50
 journalctl -u wxblendapi -n 50
+journalctl -u wxmetaringest -n 50
 
 # Timer schedules and last/next fire times
-systemctl list-timers wxingest.timer wxndfdingest.timer
+systemctl list-timers wxingest.timer wxndfdingest.timer wxmetaringest.timer
 ```
 
 ---
@@ -87,5 +91,14 @@ sudo cp systemd/wxingest.service     /etc/systemd/system/
 sudo cp systemd/wxingest.timer       /etc/systemd/system/
 sudo cp systemd/wxndfdingest.service /etc/systemd/system/
 sudo cp systemd/wxndfdingest.timer   /etc/systemd/system/
+sudo cp systemd/wxmetaringest.service /etc/systemd/system/
+sudo cp systemd/wxmetaringest.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
+```
+
+**First-time install of METAR archive units** (not yet installed):
+```bash
+sudo cp systemd/wxmetaringest.service systemd/wxmetaringest.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wxmetaringest.timer
 ```

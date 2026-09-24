@@ -1,471 +1,358 @@
 # ARCHITECTURE: Weather Window Web App
 
-*Last updated: 2026-02-27*
+*Last updated: 2026-05-14*
 
 ---
 
 ## System Overview
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    NOAA AWS S3                           │
-│          s3://noaa-nbm-grib2-pds/ (NBM CONUS)           │
-└───────────────────────┬─────────────────────────────────┘
-                        │ hourly download (~15 GB/cycle, full suite)
-                        ▼
-┌─────────────────────────────────────────────────────────┐
-│           Ubuntu Server: precip.aos.wisc.edu             │
-│                                                         │
-│  ┌──────────────────┐    ┌───────────────────────────
-─┐ │
-│  │  Ingestion       │    │  GRIB2 Staging Store       │ │
-│  │  (systemd timer) │───▶│  /data/nbm/staging/        │ │
-│  │  Herbie + Python │    │  ~15 GB, current download │ │
-│  └──────────────────┘    └───────────┬────────────────┘ │
-│                                      │ post-process      │
-│                          ┌───────────▼────────────────┐ │
-│                          │  Post-Processor             │ │
-│                          │  cfgrib / xarray            │ │
-│                          │  extract variables.yaml set │ │
-│                          │  rechunk → Zarr store       │ │
-│                          └───────────┬────────────────┘ │
-│                                      │ atomic swap       │
-│                          ┌───────────▼────────────────┐ │
-│                          │  Zarr Store (live)          │ │
-│                          │  /data/nbm/zarr/current/   │ │
-│                          │  ~20–30 GB uncompressed     │ │
-│                          │  dims: (valid_time, y, x)   │ │
-│                          │  per variable               │ │
-│                          └───────────┬────────────────┘ │
-│                                      │ xr.open_zarr()   │
-│  ┌───────────────────────────────────▼───────────────┐  │
-│  │  FastAPI REST Service                              │  │
-│  │  GET /forecast?lat=&lon=&vars=&start=&end=         │  │
-│  │  GET /variables                                    │  │
-│  │  GET /status                                       │  │
-│  └───────────────────────────────────┬───────────────┘  │
-└──────────────────────────────────────┼──────────────────┘
-                                       │ JSON response
-                                       ▼
-┌─────────────────────────────────────────────────────────┐
-│                  Client (React PWA)                      │
-│                                                         │
-│  ┌────────────────────┐   ┌───────────────────────────┐ │
-│  │  Activity Manager  │   │  Forecast Snapshot Store  │ │
-│  │  (criteria editor) │   │  (IndexedDB – drift data) │ │
-│  └────────────────────┘   └───────────────────────────┘ │
-│                                                         │
-│  ┌─────────────────────────────────────────────────────┐│
-│  │  Weather Window Timeline (Recharts / D3)             ││
-│  │  • Current forecast: colored suitability bars        ││
-│  │  • Past snapshots overlaid (forecast drift)          ││
-│  └─────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│   NOAA S3: noaa-nbm-grib2-pds (NBM CONUS)                           │
+│   blend.YYYYMMDD/HH/core/blend.tHHz.core.fXXX.co.grib2             │
+│   3-hourly cycles · ~99 files · ~15 GB per cycle                    │
+└──────────────────────────┬───────────────────────────────────────────┘
+                           │ Herbie + s3fs (6 threads, ~210s)
+                           ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│   NOAA S3: noaa-ndfd-pds (NDFD CONUS)                               │
+│   opnl/AR.conus/{VP.001-003, VP.004-007}/ds.{element}.bin           │
+│   3-hourly cycles · ~24 files · much smaller than NBM               │
+└──────────────────────────┬───────────────────────────────────────────┘
+                           │ s3fs (anonymous, ~6 threads)
+                           ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│   Ubuntu Server: precip.aos.wisc.edu                                 │
+│   32 cores · 128 GiB RAM · 10 TB disk                               │
+│                                                                      │
+│  ┌─────────────────┐     ┌──────────────────────────────────────┐   │
+│  │ NBM Ingest      │     │ NBM Slab Ring Buffer                 │   │
+│  │ (systemd timer) │────▶│ /12TB2/NBM/slabs/                   │   │
+│  │ 3-hourly        │     │ 56 runs · 99 time steps · 15 vars   │   │
+│  └─────────────────┘     └──────────────────┬───────────────────┘   │
+│                                             │                        │
+│  ┌─────────────────┐     ┌──────────────────▼───────────────────┐   │
+│  │ NDFD Ingest     │     │ NDFD Slab Ring Buffer                │   │
+│  │ (systemd timer) │────▶│ /12TB2/NDFD/slabs/                  │   │
+│  │ 3-hourly        │     │ 48 runs · ~65 time steps · 14 vars  │   │
+│  └─────────────────┘     └──────────────────┬───────────────────┘   │
+│                                             │                        │
+│  ┌──────────────────────────────────────────▼───────────────────┐   │
+│  │ FastAPI Services (gunicorn -w 1 each)                        │   │
+│  │  NBM API  127.0.0.1:8001   /wxapp/   GET /forecast,status   │   │
+│  │  NDFD API 127.0.0.1:8002   /wxndfd/  GET /forecast,status   │   │
+│  │  Blend    127.0.0.1:8004   /blend/   GET /forecast,status   │   │
+│  └──────────────────────────────────────────┬───────────────────┘   │
+│                                             │ Caddy reverse proxy   │
+└─────────────────────────────────────────────┼──────────────────────┘
+                                              │ JSON response
+                                              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│   Client (React PWA)                                                 │
+│                                                                      │
+│  ┌───────────────────────┐   ┌────────────────────────────────────┐  │
+│  │ Activity Manager      │   │ Forecast Snapshot Store (IndexedDB)│  │
+│  │ (criteria editor)     │   │ Forecast drift visualization       │  │
+│  └───────────────────────┘   └────────────────────────────────────┘  │
+│                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │ Weather Window Timeline (Recharts / D3)                         │ │
+│  │ • Current forecast: colored suitability bars                    │ │
+│  │ • Past snapshots overlaid (forecast drift)                      │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Backend: Data Ingestion
+## Backend: Data Sources
 
-### Data source
+### NBM — National Blend of Models
 
-**NOAA National Blend of Models (NBM), CONUS domain**
+- S3 bucket: `noaa-nbm-grib2-pds` (us-east-1, public, no auth)
+- Path: `blend.YYYYMMDD/HH/core/blend.tHHz.core.fXXX.co.grib2`
+- Issued every hour; ingested every 3 hours (00/03/06/09/12/15/18/21Z)
+- ~99 files per cycle after thinning (36 hourly + 51 3-hourly + 12 6-hourly)
+- Grid: CONUS ~2345 × 1597, ~2.5 km Lambert Conformal
+- Horizon: ~260 hours (~11 days)
 
-- S3 bucket: `noaa-nbm-grib2-pds` (us-east-1, public, no auth required)
-- Path pattern: `blend.YYYYMMDD/HH/core/blend.tHHz.core.fXXX.co.grib2`
-- Issued: every hour (00Z–23Z). Each cycle contains ~100 files covering the full forecast horizon.
-- Temporal resolution: f001–f036 hourly (step 1); f037–f190 3-hourly (step 3); f196–f262 6-hourly (step 6). Verified 2026-02-27.
-- File size: ~150 MB per forecast-hour file (all ~294 GRIB2 records). Total per cycle: ~15 GB.
-- Source availability: hourly files on NOMADS and S3; extended-range (f037+) on S3 only. Herbie `priority=["aws", "nomads"]`.
+### NDFD — National Digital Forecast Database
 
-### Ingestion strategy
+- S3 bucket: `noaa-ndfd-pds` (public, no auth)
+- Path: `opnl/AR.conus/{VP.001-003,VP.004-007}/ds.{element}.bin`
+- Two periods: VP.001-003 (hourly, days 1–3), VP.004-007 (3-hourly, days 4–7)
+- Per-element binary files; ~24 files per cycle
+- Grid: CONUS ~2145 × 1377, ~2.5 km Lambert Conformal
+- Horizon: ~168 hours (~7 days)
 
-- A **systemd timer** triggers a Python ingestion script each hour, offset ~10 minutes after the top of the hour to allow NOAA upload to complete.
-- The script uses **Herbie** to identify and download the latest available cycle into `/data/nbm/staging/`.
-- Download is the full GRIB2 suite for all forecast hours (no message-level subsetting at download time). This simplifies ingestion and means the raw files are available if variable needs change without re-downloading.
-- On download completion, the post-processor runs (see next section). Once the Zarr store is written and validated, the staging GRIB2 files are deleted and the Zarr store is swapped live.
-- A lock file prevents overlapping ingestion runs.
+---
 
-### Retention policy
+## Backend: Slab Ring Buffer Store
 
-Keep only the **current cycle's Zarr store** on disk. Raw GRIB2 staging files are deleted after post-processing. The client retains past forecast snapshots for drift visualization — the backend does not serve historical forecasts.
+Both NBM and NDFD use the same slab ring buffer architecture. Each slab is one forecast-time step for all retained variables across the full spatial grid:
 
-If a new cycle fails to download or process, the previous Zarr store remains live and continues to serve API requests.
+```
+shape: (idim, jdim, kvars)
+dtype: int16 (scale/offset packed)
+order: C (so arr[i, j, :] is contiguous — efficient point queries)
+```
+
+Files are fixed-named slots (`slab_000.npy` … `slab_N.npy`) in a ring, with logical ordering tracked in `ring_state.json`. The API reads time series by visiting each slab and reading one `arr[i, j, :]` vector, requiring no full-array loads.
+
+**NBM store:** 56 retained runs × 99 time steps per run (7 days × 8 cycles/day), ~22 GB  
+**NDFD store:** 48 retained runs × ~65 time steps per run (~6 days), substantially smaller
+
+After each successful ingest the API hot-swaps its store state via `POST /admin/reload` without restarting gunicorn.
+
+### Incomplete cycles — degrade, don't backfill
+
+**Decision (2026-09-24): when a cycle commits with fewer forecast steps than normal, the missing valid times stay missing. The forecast horizon shortens; the backend does not splice in data from an earlier cycle.**
+
+A cycle can commit truncated when upstream data is incomplete at ingest time. On 2026-09-23 NOAA's NBM S3 mirror lagged ~13 hours; because extended-range files (f038+) are S3-only, the 20Z cycle committed with 40 of 99 slabs and a 2-day horizon instead of 11.
+
+Verified current behaviour — this is clean degradation, not corruption:
+
+- `NBMStore.get_point_timeseries()` resolves one run and walks `fxx_idx` within that slot, so a truncated run simply yields a shorter series. No sentinel values leak into the response.
+- Blend responses carry a single contiguous block of trailing nulls where the short NBM tail should have been. NDFD still covers its full 168h, so a truncated NBM costs only the NBM-only tail (days ~7–11).
+
+**Why not fall back to the previous cycle.** It is technically cheap — all 56 runs stay mmap'd, so the older data is already resident, and `_merge_series()` in `blend_forecast.py` already reindexes sources onto a unified valid-time axis with a per-step `source` label. The objection is *forecast drift integrity*, the app's core feature: the backend serves only the current forecast and the client stores snapshots to visualize change. Silently splicing cycle N−1 into cycle N makes the client record a chimera, and the spliced hours then show artificially **zero drift** against the previous snapshot — exactly the signal the app exists to display. A gap is honest; a silent splice is misinformation.
+
+If this is ever revisited, the fallback must be **labeled per time step** (e.g. `source: "nbm@20260923_17"`) so the client can exclude backfilled steps from drift comparison, and it must happen at **read time**, not ingest time — writing borrowed slabs into the ring buffer would make `n_fxx` misreport what was actually fetched and destroy the signal the health monitor's completeness check depends on.
+
+**Frontend implication:** the timeline is variable-length and may end in a run of nulls. Do not hard-code an 11-day axis or assume every snapshot has the same number of steps.
 
 ---
 
 ## Backend: Variable Registry
 
-A YAML configuration file (`variables.yaml`) drives both the post-processing step (which variables to extract from GRIB2) and the API layer (what clients can request). It is the single source of truth for supported variables and is designed to be easily extended without code changes.
+`variables.yaml` (NBM) and `variables_ndfd.yaml` (NDFD) are the single sources of truth for both post-processing (which variables to extract) and the API (what clients can request).
 
-**Structure:**
-```yaml
-variables:
+**NBM native variables (15):** temperature, dewpoint, relative_humidity, apparent_temperature, wind_speed, wind_direction, wind_gust, total_precipitation, precip_type, thunderstorm_probability, cape, cloud_cover, solar_radiation, visibility, cloud_ceiling
 
-  # --- Native NBM variables (extracted from GRIB2) ---
+**NDFD native variables (14):** temperature, dewpoint, relative_humidity, apparent_temperature, wind_speed, wind_direction, wind_gust, total_precipitation, thunderstorm_probability (severe), cloud_cover, visibility, cloud_ceiling, wet_bulb_globe_temp, snowfall
 
-  temperature:
-    grib_shortName: "2t"
-    grib_typeOfLevel: "heightAboveGround"
-    grib_level: 2
-    units_raw: "K"
-    units_out: "F"
-    description: "2-meter air temperature"
+**Derived (both):** `sun_elevation` — computed at query time via pysolar from lat/lon + valid_time.
 
-  wind_speed:
-    grib_shortName: "si10"
-    grib_typeOfLevel: "heightAboveGround"
-    grib_level: 10
-    units_raw: "m/s"
-    units_out: "mph"
-    description: "10-meter wind speed"
-
-  wind_direction:
-    grib_shortName: "wdir10"
-    grib_typeOfLevel: "heightAboveGround"
-    grib_level: 10
-    units_raw: "degrees"
-    units_out: "degrees"
-    description: "10-meter wind direction (meteorological)"
-
-  wind_gust:
-    grib_shortName: "gust"
-    grib_typeOfLevel: "surface"
-    units_raw: "m/s"
-    units_out: "mph"
-    description: "Wind gust speed"
-
-  relative_humidity:
-    grib_shortName: "r2"
-    grib_typeOfLevel: "heightAboveGround"
-    grib_level: 2
-    units_raw: "%"
-    units_out: "%"
-    description: "2-meter relative humidity"
-
-  precipitation_probability:
-    grib_shortName: "pop12"          # verify exact NBM shortName
-    grib_typeOfLevel: "surface"
-    units_raw: "%"
-    units_out: "%"
-    description: "12-hour probability of precipitation"
-
-  cloud_cover:
-    grib_shortName: "tcc"
-    grib_typeOfLevel: "atmosphere"
-    units_raw: "%"
-    units_out: "%"
-    description: "Total cloud cover"
-
-  solar_radiation:
-    grib_shortName: "dswrf"
-    grib_typeOfLevel: "surface"
-    units_raw: "W/m²"
-    units_out: "W/m²"
-    description: "Downward short-wave radiation flux (12-hr mean)"
-
-  # --- Derived variables (computed post-extraction, not stored in Zarr) ---
-
-  sun_elevation:
-    derived: true
-    requires: ["lat", "lon", "valid_time"]
-    formula: "pysolar"
-    units_out: "degrees"
-    description: "Solar elevation angle above horizon (purely astronomical)"
-
-  heat_index:
-    derived: true
-    requires: ["temperature", "relative_humidity"]
-    formula: "rothfusz"
-    units_out: "F"
-    description: "Heat index (NWS formula; valid when temp ≥ 80°F)"
-
-  wind_chill:
-    derived: true
-    requires: ["temperature", "wind_speed"]
-    formula: "noaa_2001"
-    units_out: "F"
-    description: "Wind chill (valid when temp ≤ 50°F and wind > 3 mph)"
-```
-
-Adding a native variable: add an entry here; the post-processor picks it up on the next cycle. Adding a derived variable: add an entry here and implement the formula in `derived.py`.
+Adding a native variable: add an entry to the relevant YAML; the post-processor picks it up on the next cycle. Adding a derived variable: add an entry (with `derived: true`) and implement the formula in `extraction/derived.py`.
 
 ---
 
-## Backend: Post-Processing (GRIB2 → Zarr)
+## Backend: Blend Strategy
 
-After each successful GRIB2 download, the post-processor converts the raw files into a single Zarr store optimized for point time series queries.
+The Blend API (`blend_main.py`, port 8004) reads both stores and merges responses:
 
-### Why Zarr
+- **ndfd_preferred:** NDFD for hours 1–168, NBM fills beyond NDFD horizon  
+- **nbm_only:** `precip_type`, `cape`, `solar_radiation`, `thunderstorm_probability` (general)  
+- **ndfd_only:** `wet_bulb_globe_temp`, `snowfall`, `thunderstorm_probability_severe`
 
-- xarray-native (`xr.open_zarr()`) — clean, idiomatic API
-- Coordinate metadata (lat, lon, valid_time) stored alongside data
-- Chunking is controllable and critical for query performance (see below)
-- Supports uncompressed or fast codecs (LZ4 via Blosc) without third-party tools
+Every variable array in the blend response has a companion `_source` array (`"ndfd"` / `"nbm"` / `null`). Degraded mode: if one store is down, affected variables return all-null; the other source serves normally.
 
-### Dataset structure
-
-One xarray variable per weather variable in `variables.yaml`, all in a single Zarr store:
-
-```
-/data/nbm/zarr/current/
-  ├── .zmetadata
-  ├── temperature/        ← array shape: (n_time, n_y, n_x), float32
-  ├── wind_speed/
-  ├── wind_direction/
-  ├── ...
-  └── coords/
-        valid_time/       ← datetime64 array, length n_time
-        latitude/         ← 2D float32 array, shape (n_y, n_x)
-        longitude/        ← 2D float32 array, shape (n_y, n_x)
-```
-
-NBM CONUS grid: approximately 2345 × 1597 grid points (~2.5 km resolution).
-Time steps per cycle: ~100 (36 hourly + ~52 at 3-hr + ~12 at 6-hr).
-
-### Chunking strategy
-
-**Goal:** minimize I/O for a point time series query (all time steps at one lat/lon).
-
-**Chunk shape:** `(n_time, 256, 256)` — all time steps in one chunk per 256×256 spatial tile (~640 km × 640 km).
-
-This means:
-- A single-point time series query reads exactly **one chunk per variable** (~100 time steps × 256 × 256 × 4 bytes ≈ 25 MB per chunk).
-- Total for a 10-variable query: ~250 MB of I/O. Well under 100ms from SSD or page cache (128 GiB RAM holds the entire store).
-- Only ~70 chunks per variable (ceil(1597/256) × ceil(2345/256) = 7 × 10), so writes are fast (~5s for the full store).
-- Spatial map queries are also reasonably efficient at this tile size.
-
-### Storage size estimate
-
-Per variable, float32, uncompressed: 100 time steps × 2345 × 1597 × 4 bytes ≈ 1.5 GB.
-For ~20 variables: ~30 GB per cycle. Well within the 10 TB budget.
-
-Note: the ~150 MB/file raw GRIB2 size is larger than the ~75 MB initially estimated, but the
-extracted Zarr arrays reflect only the decoded float32 grids — the GRIB2 overhead (metadata,
-compression, multi-variable packing) does not carry over. The ~30 GB Zarr estimate stands.
-
-With LZ4 compression (Blosc codec, level 1): expect ~50% reduction → ~15 GB, with negligible decompression overhead. **Start uncompressed for simplicity; add LZ4 if disk usage becomes a concern.**
-
-### Post-processing pipeline
-
-```python
-# Pseudocode sketch
-for var_name, var_cfg in variable_registry.native_variables():
-    arrays = []
-    for grib2_file in sorted(staging_files):
-        ds = xr.open_dataset(grib2_file, engine='cfgrib',
-                             backend_kwargs={'filter_by_keys': {
-                                 'shortName': var_cfg['grib_shortName'],
-                                 'typeOfLevel': var_cfg['grib_typeOfLevel'],
-                             }})
-        arrays.append(apply_unit_conversion(ds[var_name], var_cfg))
-    combined = xr.concat(arrays, dim='valid_time')
-    dataset[var_name] = combined.chunk({'valid_time': -1, 'y': 4, 'x': 4})
-
-dataset.to_zarr('/data/nbm/zarr/staging_new/', mode='w')
-atomic_swap('/data/nbm/zarr/staging_new/', '/data/nbm/zarr/current/')
-```
-
-The atomic swap (rename at the directory level) ensures the API never reads a partially-written store.
+**Note:** `thunderstorm_probability` (NBM) = general tstm; `thunderstorm_probability_severe` (NDFD) = total severe tstm. They are semantically different — never merged.
 
 ---
 
-## Backend: API (FastAPI)
+## Backend: Post-Processing
 
-### Hardware reference
+### File-centric extraction (critical for performance)
 
-| Machine | Role | RAM | Notes |
+Each GRIB2 file is opened **exactly once** with `cfgrib.open_datasets()`, and all applicable variables are extracted in that single pass. The alternative (one open per variable) would be ~15× slower. Do not restructure back to a variable-centric loop.
+
+Uses `ProcessPoolExecutor` (8 workers by default): cfgrib's C extensions hold the GIL, so threading provides no parallelism — processes are required.
+
+### Temporal interpolation
+
+Point queries are upsampled to a uniform 1-hour grid at query time. The store retains only native valid times; interpolation is performed entirely in `zarr_query.py` / `slab_query.py`:
+
+| Variable | Method |
+|---|---|
+| Continuously varying | Linear (`pd.Series.interpolate(method='time')`) |
+| `wind_direction` | Circular (sin/cos → interpolate → atan2) |
+| `precip_type` | Forward-fill (categorical) |
+
+`interpolate(method='time')` never extrapolates past the last non-NaN value, so cutoff variables (visibility f076, ceiling f082, thunderstorm f190) naturally return null beyond their range.
+
+---
+
+## Backend: API Services
+
+Three FastAPI services share the same router structure (`/forecast`, `/variables`, `/status`, `/admin/reload`):
+
+| Service | Port | Caddy path | Store |
 |---|---|---|---|
-| `precip.aos.wisc.edu` (Ubuntu) | Production | 128 GiB | Fast university connection; ~98 GiB headroom after Zarr store |
-| MacPro M4 (macOS) | Development | 48 GiB | Zarr store (~30 GB) fits in page cache; ~18 GiB headroom |
+| NBM API (`main.py`) | 8001 | `/wxapp/` | NBM slab ring buffer |
+| NDFD API (`ndfd_main.py`) | 8002 | `/wxndfd/` | NDFD slab ring buffer |
+| Blend API (`blend_main.py`) | 8004 | `/blend/` | Both stores |
 
-**Query performance on both machines:** The full Zarr store (~30 GB for 20 variables) fits in RAM on both the production server and the dev Mac. After the first access following each ingestion cycle, the OS page cache will hold the entire dataset in memory and point queries will be sub-millisecond. No application-level caching layer is needed.
+**Single gunicorn worker per service** (`-w 1`): `app.state` is process-local. Multi-worker support would require shared memory or a sidecar store; deferred.
 
-**Optional production optimization:** Explicitly `load()` the Zarr dataset into an in-process xarray Dataset on API startup, pinning it in RAM independently of the page cache. This guarantees fast queries even under memory pressure from other server processes, at the cost of ~30 GB of committed RAM. With 128 GiB available this is low-risk; defer until benchmarking suggests it's needed.
+**Forecast drift:** the `age_hours` parameter on `/forecast` returns a past retained cycle at least that many hours older than the current run. The frontend uses this to overlay historical forecasts.
 
-**Local testing note:** On the 48 GiB Mac, avoid explicit `load()` during development — the page cache approach leaves more headroom for other apps. Single-user local testing will not stress the page cache.
+**See BACKEND.md** for the full API reference (endpoint parameters, response shapes, variable catalog, merge policy, error codes).
 
-### Serving point queries from Zarr
+---
 
-The API opens the Zarr store once at startup with `xr.open_zarr()`. Because the array is chunked with `valid_time=-1`, extracting a full time series at one point is:
+## Backend: Ancillary Processes
 
-```python
-ds = xr.open_zarr('/data/nbm/zarr/current/')
-lat_idx, lon_idx = find_nearest_grid_point(lat, lon, ds)
-timeseries = ds['temperature'].isel(y=lat_idx, x=lon_idx).values  # one chunk read
-```
+### Health monitor (`scripts/wxmonitor.py`)
 
-Derived variables (heat index, wind chill, sun elevation) are computed on the fly from the extracted native values after the Zarr read.
+Runs every 20 minutes via `wxmonitor@{nbm,ndfd,blend}.timer`. Pings `GET /status`, POSTs to healthchecks.io (dead-man's switch), and emails on failure. Three checks per service:
 
-### Temporal interpolation to 1-hour resolution
+1. **Responsiveness** — `/status` answers within the timeout.
+2. **Freshness** — the committed cycle is no older than `max_age_h` (6h for all three, matching the 3-hourly ingest cadence).
+3. **Completeness** — the committed cycle has at least `min_time_steps` forecast steps: 90 for NBM (full cycle = 99), 50 for NDFD (normal range 59–65). `None` for blend, whose `/status` exposes no step count; its two stores are covered by the NBM and NDFD monitors.
 
-The Zarr store contains data only at NBM valid times: hourly for f001–f036, then every 3 hours, then every 6 hours. The query layer upsamples to a **consistent 1-hour grid** before returning a response, so the client always receives a uniform time axis regardless of how far out the forecast extends.
+The completeness check exists because freshness alone cannot see a truncated cycle — see *Incomplete cycles* above. Both checks are pure functions (`check_freshness()`, `check_completeness()`) covered by `tests/test_wxmonitor.py`.
 
-**Design rule:** The Zarr store is always the unmodified source of truth — raw valid times and NaN where data is absent. Interpolation is performed entirely at query time in `zarr_query.py`, never at ingest time.
+### METAR archive (`scripts/metar_archive.py`)
 
-**Interpolation method by variable type:**
+Runs hourly at :10 past via `wxmetaringest.timer`. Downloads current METARs from the AWC Aviation Weather Center API for configured stations and appends to JSONL files in `/12TB1/METAR_archive/`. Intended as the "truth" counterpart to the forecast archive (see `backend/app/archive/ARCHIVE.md`).
 
-| Variable type | Variables | Method |
-|---|---|---|
-| Continuously varying | temperature, dewpoint, RH, apparent_temperature, wind_speed, wind_gust, cloud_cover, solar_radiation, CAPE, visibility, ceiling, thunderstorm_probability, total_precipitation | **Linear interpolation** between adjacent valid times |
-| Circular | wind_direction | **Circular interpolation** on the unit circle — convert to sin/cos, interpolate linearly, convert back. Avoids the 350°→10° wrapping error that plain linear interpolation produces. |
-| Categorical | precip_type | **Forward-fill (nearest neighbor)** — there is no meaningful interpolation between integer precipitation type codes (rain=1, freezing rain=3, snow=5, sleet=8). Use the most recently valid type. |
+### Forecast archive (`backend/app/archive/`)
 
-`total_precipitation` (QPF01) belongs with the continuously-varying group. At the short-range (f001–f036, hourly) each value is a point estimate where timing precision matters. But by the 3-hourly and 6-hourly segments, forecast timing uncertainty has grown large enough that the NBM's QPF01 value is already expressing a smoothed expected intensity over a broad temporal neighborhood rather than a sharp point-in-time event. Interpolating to intermediate hours is therefore no less accurate than the underlying forecast — it simply makes explicit what the model's temporal uncertainty already implies. The smooth precipitation intensity assumption is a meteorological property of extended-range forecasting, not a data convenience.
-
-**Variables with hard fxx cutoffs** (visibility, ceiling, thunderstorm_probability beyond f076/f082/f190): return NaN beyond the cutoff — do not extrapolate.
-
-**Optional: interpolation flag in response.** The API response can include a boolean `interpolated` per time step so the front end can distinguish native NBM values from filled-in hours. This lets the UI render interpolated steps with subtly different styling if desired (lighter weight, dotted line) without requiring the client to infer it from timestamps.
-
-**Implementation sketch:**
-```python
-# After extracting point time series from Zarr:
-# raw_times: irregular datetime64 array (actual NBM valid times)
-# raw_values: float32 array, same length, NaN where not extracted
-
-target_times = pd.date_range(start=raw_times[0], end=raw_times[-1], freq='1h')
-
-# Linear (most variables):
-interp_values = np.interp(target_times.astype(np.int64),
-                          raw_times.astype(np.int64),
-                          raw_values)
-
-# Circular (wind_direction):
-sin_vals = np.interp(..., np.sin(np.radians(raw_values)))
-cos_vals = np.interp(..., np.cos(np.radians(raw_values)))
-interp_dir = np.degrees(np.arctan2(sin_vals, cos_vals)) % 360
-```
-
-The Zarr store can be held open in memory by the FastAPI process. After the atomic swap of a new cycle, the API reloads it (triggered by the ingestion script via an internal signal or by detecting a new cycle timestamp in `/status`).
-
-### Endpoints
-
-**`GET /forecast`**
-```
-Parameters:
-  lat       float   required   Latitude (decimal degrees)
-  lon       float   required   Longitude (decimal degrees)
-  vars      string  required   Comma-separated variable names
-  start     string  optional   ISO datetime (defaults to current time)
-  end       string  optional   ISO datetime (defaults to +10 days)
-
-Response (JSON):
-{
-  "cycle": "2026-02-27T12:00:00Z",
-  "lat_actual": 43.072,              // nearest grid point lat
-  "lon_actual": -89.398,             // nearest grid point lon
-  "variables": {
-    "temperature": {
-      "units": "F",
-      "values": [
-        {"time": "2026-02-27T13:00:00Z", "value": 34.2},
-        ...
-      ]
-    },
-    "wind_speed": { ... },
-    "heat_index": { ... }            // derived, computed on the fly
-  }
-}
-```
-
-**`GET /variables`**
-Returns the full variable registry with names, units, descriptions, derived flag.
-
-**`GET /status`**
-Returns cycle timestamp of current Zarr store, last successful ingestion time, store size on disk.
-
-### Notes
-
-- Response time target: <100ms for all queries (single chunk read per variable from local SSD).
-- No authentication in Phase 1.
-- CORS enabled for all origins during prototype.
+After each NBM or NDFD ingest, the blend API saves a full forecast time series for configured stations to `/12TB1/FCST_series/`. Accumulates training data for a future bias-correction scheme.
 
 ---
 
 ## Frontend: React PWA
 
-### Stack
+*(Not yet implemented — see ROADMAP.md Phase 4)*
 
 | Concern | Library |
 |---|---|
 | Framework | React 18 |
 | Routing | React Router |
 | Styling | Tailwind CSS |
-| Charts | Recharts (primary); drop to D3 only if custom viz requires it |
+| Charts | Recharts (primary); D3 for custom viz |
 | Local storage | IndexedDB via `idb` wrapper |
-| PWA | Vite PWA plugin (service worker, installable) |
-| HTTP client | TanStack Query (caching, background refresh) |
+| PWA | Vite PWA plugin |
+| HTTP client | TanStack Query |
 
 ### Key views
 
-**1. Activity Manager** — create/edit named activities. Each activity has a list of weather criteria: variable + comparison operator + threshold value(s). Persisted in localStorage.
-
-**2. Location Picker** — address/place search (OpenStreetMap Nominatim, free). Multiple saved locations. Persisted in localStorage.
-
-**3. Weather Window Timeline** — core view:
-- X-axis: time (next 10 days)
-- Top strip: suitability bar (green = all criteria met, yellow = marginal, red = one or more criteria failed)
-- Below: overlaid strips from past forecast snapshots stored in IndexedDB (forecast drift visualization)
-- Tap on any time slot: popover with variable values + per-criterion pass/fail status
-- Toggle individual criteria on/off
-
-**4. Variable Detail Charts** — standard line charts for individual variables for context.
+1. **Activity Manager** — create/edit activities with weather criteria (variable + operator + threshold). Persisted in localStorage.
+2. **Location Picker** — address search via OpenStreetMap Nominatim; saved locations in localStorage.
+3. **Weather Window Timeline** — suitability bar (green/yellow/red), past snapshot overlays for drift, tap for variable detail popover.
+4. **Variable Detail Charts** — standard line charts for individual variables.
 
 ### Client-side forecast drift
 
-When the client fetches a forecast, it stores the full JSON response in IndexedDB tagged with the fetch timestamp and location. The timeline overlays up to 10 past snapshots. A cleanup routine enforces a retention limit (last 30 snapshots per location) to prevent unbounded storage growth.
+The frontend stores each fetched forecast in IndexedDB tagged with fetch timestamp and location. The timeline overlays up to 10 past snapshots. Retention limit: last 30 snapshots per location.
 
 ---
 
 ## Development & Deployment
 
-### Dev environment (macOS)
+### Server
 
-- Ingest a single NBM cycle for testing (one pass of the ingestion script).
-- Zarr store written to local disk; API opens it the same way as production.
-- `uvicorn app.main:app --reload` for API.
-- `npm run dev` (Vite) for frontend.
+| Item | Value |
+|---|---|
+| Host | `precip.aos.wisc.edu` — Ubuntu, 32 cores, 128 GiB RAM, 10 TB disk |
+| Python venv | `/home/gpetty/WxApp/.venv` |
+| NBM data root | `/12TB2/NBM/` (env var `DATA_DIR`) |
+| NDFD data root | `/12TB2/NDFD/` (env var `NDFD_DATA_DIR`) |
+| Forecast archive | `/12TB1/FCST_series/` |
+| METAR archive | `/12TB1/METAR_archive/` |
+| Reverse proxy | Caddy |
 
-### Production (Ubuntu server)
-
-- Ingestion + post-processing: systemd timer, Python venv.
-- API: `uvicorn` behind `nginx` reverse proxy, HTTPS via Let's Encrypt.
-- Frontend: static Vite build served by `nginx`.
-
-### Directory layout
+### Repository layout
 
 ```
-/data/nbm/
-  staging/             ← GRIB2 download in progress (deleted after post-processing)
-  zarr/
-    current/           ← live Zarr store (API reads from here)
-    staging_new/       ← new Zarr being written (swapped in atomically)
-
-/srv/weatherwindow/
-  backend/
-    app/
-      main.py
-      routers/
-      extraction/
-        zarr_query.py
-        derived.py
-      postprocessor/
-        grib2_to_zarr.py
-      variables.yaml
-  frontend/            ← built React PWA (served by nginx)
-  venv/
+/home/gpetty/WxApp/
+├── backend/
+│   └── app/
+│       ├── config.py               # NBM paths, concurrency, ring buffer params
+│       ├── config_ndfd.py          # NDFD paths and params
+│       ├── variables.yaml          # NBM variable registry
+│       ├── variables_ndfd.yaml     # NDFD variable registry
+│       ├── registry.py             # VariableRegistry, NativeVariable, DerivedVariable
+│       ├── main.py                 # NBM FastAPI app (port 8001)
+│       ├── ndfd_main.py            # NDFD FastAPI app (port 8002)
+│       ├── blend_main.py           # Blend FastAPI app (port 8004)
+│       ├── archive/
+│       │   ├── archiver.py         # forecast archive sweep logic
+│       │   ├── config.py           # archive root path
+│       │   ├── stations.yaml       # stations to archive
+│       │   ├── nbm_variables.yaml  # NBM variables to archive
+│       │   └── ndfd_variables.yaml # NDFD variables to archive
+│       ├── extraction/
+│       │   ├── zarr_query.py       # point query + interpolation
+│       │   └── derived.py          # sun_elevation (pysolar)
+│       ├── ingest/
+│       │   ├── _common.py          # IngestLock, LockError, cycle_tag_in_ring_buffer
+│       │   ├── ingest.py           # NBM cycle discovery, download, staging
+│       │   ├── ndfd_ingest.py      # NDFD S3 download, staging
+│       │   └── __main__.py         # CLI: python -m backend.app.ingest
+│       ├── postprocessor/
+│       │   ├── grib2_to_zarr.py    # GRIB2 → slab extraction (NBM, file-centric)
+│       │   ├── ndfd_slab_ingest.py # GRIB2 → slab extraction (NDFD)
+│       │   ├── slab_ingest.py      # NBM slab write coordinator
+│       │   ├── conversions.py      # K→F, m/s→mph, m→miles/feet
+│       │   └── __main__.py         # CLI: python -m backend.app.postprocessor
+│       ├── routers/
+│       │   ├── forecast.py         # GET /forecast (NBM + NDFD)
+│       │   ├── blend_forecast.py   # GET /blend/forecast, BLEND_RULES
+│       │   ├── blend_status.py     # GET /blend/status
+│       │   ├── blend_variables.py  # GET /blend/variables
+│       │   ├── helpers.py          # shared query utilities
+│       │   └── models.py           # Pydantic response models
+│       └── store/
+│           ├── ring_state.py       # RingState — logical/physical slot mapping
+│           ├── writer.py           # SlabWriter — atomic slab writes
+│           └── nbm_store.py        # NBMStore — mmap'd point queries
+├── scripts/
+│   ├── metar_archive.py            # hourly METAR download → JSONL
+│   └── wxmonitor.py                # health monitor → healthchecks.io
+└── systemd/
+    ├── wxapi.service / wxingest.service / wxingest.timer
+    ├── wxndfdapi.service / wxndfdingest.service / wxndfdingest.timer
+    ├── wxblendapi.service
+    ├── wxmetaringest.service / wxmetaringest.timer
+    └── wxmonitor@.service / wxmonitor@{nbm,ndfd,blend}.timer
 ```
+
+---
+
+## Key Implementation Gotchas
+
+**Herbie requires naive UTC datetimes.** Use `datetime.utcnow()` (naive), not `datetime.now(tz=timezone.utc)`. Timezone-aware datetimes cause silent failures.
+
+**Extended-range NBM files (f038+) are S3-only.** Use `priority=["aws", "nomads"]` for all Herbie calls.
+
+**NBM longitude convention: 0–360.** The NBM CONUS grid uses east-positive longitude. Convert user-supplied negative longitudes: `lon_360 = lon + 360 if lon < 0 else lon`. Return `actual_lon` in ±180 in API responses.
+
+**cfgrib shortNames differ from WMO standard:**
+- wind speed: `10si` (not `si10`)
+- wind gust: `i10fg`
+- solar radiation: `sdswrf` (not `dswrf`)
+- Filter by `shortName` + `typeOfLevel` only — never by level value. NBM uses non-standard level encoding.
+
+**No dask.** `ds.chunk()` requires dask. Pass chunk sizes via `encoding` in `ds.to_zarr()`. Use `ds.sizes` (not deprecated `ds.dims`).
+
+**pandas Timestamp tz-localize quirk (server's pandas version).** `pd.Timestamp.now("UTC").floor("h")` raises `TypeError`. Instead: construct naive first, then localize: `pd.Timestamp(datetime.utcnow().replace(...)).tz_localize("UTC")`.
+
+**`NativeVariable` is a dataclass** (picklable) — safe for `ProcessPoolExecutor`.
+
+**Single gunicorn worker per service.** `app.state` is process-local. Do not change to `-w N` without adding a shared-memory or sidecar store.
 
 ---
 
 ## Open Questions / Pending Decisions
 
-1. **LZ4 compression on Zarr.** Start uncompressed for simplicity. If ~30 GB/cycle is a concern, add `compressor=Blosc(cname='lz4', clevel=1)` — near-zero decompression overhead, ~50% size reduction. Decide after first production ingestion run.
+1. **healthchecks.io UUIDs.** All three monitors currently POST to the *same* check UUID in `scripts/wxmonitor.py`. Interleaved pings mean one service's failure can be cleared by another service's success ~20 min later, weakening the dead-man's switch. Give each service its own check.
 
-2. **Zarr reload signal.** After atomic swap of a new Zarr store, the API must reload its open dataset handle. Options: (a) the ingestion script POSTs to an internal `/admin/reload` endpoint; (b) the API polls the cycle timestamp in `/data/nbm/zarr/current/.zattrs` on each request and reloads on change. Option (b) is simpler and avoids shared state.
+2. **METAR archive systemd units** (`wxmetaringest.service` / `.timer`). Units exist in `systemd/` but have not yet been installed. Run:
+   ```bash
+   sudo cp systemd/wxmetaringest.service systemd/wxmetaringest.timer /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now wxmetaringest.timer
+   ```
 
-3. **Frontend chart library.** Start with Recharts. The suitability bar chart (colored segments across a timeline) may require custom D3 rendering — evaluate during Phase 3.
+3. **Frontend.** Not yet started. See ROADMAP.md Phase 4.
 
-4. **Offline support.** Service worker caching of last forecast. Defer to Phase 2.
+4. **Zarr compression.** Currently uncompressed float32. The full slab store fits in 128 GiB RAM. Add `Blosc(cname='lz4', clevel=1)` if disk usage becomes a concern.
 
-5. **GRIB2 shortName verification.** The `grib_shortName` values in `variables.yaml` must be verified against an actual NBM GRIB2 file before the post-processor is written. NBM uses non-standard shortNames for some fields. First development task should be to inspect a real file with `cfgrib.open_datasets()` and inventory available fields.
+5. **Multi-worker API.** Currently limited to single gunicorn worker per service. Multi-worker support requires shared memory or a sidecar store; deferred until request volume demands it.
+
+6. **Cross-cycle backfill for incomplete cycles.** Deferred by decision — see *Incomplete cycles — degrade, don't backfill*. Revisit only if the monitor's completeness alerts show truncation is frequent enough to matter, and only under the labeled, read-time constraints described there.
+
+7. **Truncated-commit path in ingest.** The same upstream condition yields two different outcomes depending on timing: if the S3 listing *fails*, the fallback schedule makes every missing file a hard download failure and nothing commits; if the listing *succeeds but is incomplete*, the missing steps are simply "not expected" and a truncated cycle commits silently (`ingest.py`, `download_cycle()`). The health monitor now catches the result, but ingest still creates it. Consider a minimum-horizon guard before commit.

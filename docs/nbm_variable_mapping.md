@@ -3,6 +3,7 @@
 **Reference:** [NBM Weather Element Definitions](https://vlab.noaa.gov/web/mdl/nbm-weather-elements) (MDL, NBM v4.2)
 **Verified against:** `blend.t18z.core.f{001,037,196}.co.grib2`
 **Date verified:** 2026-02-28
+**Status note (2026-05-14):** Items 3, 4, 5 in Recommendations are resolved; `precip_probability` removed from registry; `apparent_temperature` is now primary feels-like.
 
 ---
 
@@ -24,8 +25,8 @@
 | `cape` | CAPE (aviation suite) | CAPE | `cape` | Docs mention under aviation; no explicit fxx range given | **f001–f264** (assumed; unverified) | J kg⁻¹ | J kg⁻¹ | Listed alongside echo tops (36h hourly) — actual range needs verification |
 | `cloud_cover` | Mean Sky Cover | Cover | `tcc` | hourly to 36h, 3-hr to 192h, 6-hr to 264h | **f001–f264** | % (0–100) | % | Matches docs |
 | `solar_radiation` | *Not in main element table* | sdswrf | `sdswrf` | Fire weather support variable; no explicit range | **f001–f264** (assumed) | W m⁻² | W m⁻² | Used in Fosberg Fire Index calculation; present in files but not documented as a standalone element |
-| `visibility` | Visibility | Vis | `vis` | Docs: expert-weighted; no explicit fxx cutoff given | **f001–f076** hard cutoff | m | miles | ⚠️ Docs don't acknowledge this cutoff; likely a modeling limitation |
-| `cloud_ceiling` | Ceiling | Cig | `ceil` | Docs: no explicit fxx cutoff given | **f001–f082** hard cutoff | m | feet | ⚠️ Docs don't acknowledge this cutoff |
+| `visibility` | Visibility | Vis | `vis` | Docs: expert-weighted; no explicit fxx cutoff given | **f001–f076** hard cutoff (`fxx_cutoff: 76` in registry) | m | miles | ⚠️ Docs don't acknowledge this cutoff; likely a modeling limitation |
+| `cloud_ceiling` | Ceiling | Cig | `ceil` | Docs: no explicit fxx cutoff given | **f001–f082** hard cutoff (`fxx_cutoff: 82` in registry) | m | feet | ⚠️ Docs don't acknowledge this cutoff |
 
 ---
 
@@ -101,10 +102,10 @@ The following are available in the NBM CONUS core product but not in `variables.
 
 2. **Verify `tstm` step range** on an f088 sample file to confirm whether it encodes a 3-hour or 6-hour thunder probability window for that segment.
 
-3. **Consider adding `PoP01`** (1-hr precip probability, shortName likely `pop` or `pop01`) for the f001–f036 hourly segment. This is more meaningful for a quasi-hourly app than `pop12`.
+3. ~~**Consider adding `PoP01`**~~ — **deferred**. Low incremental value given NDFD's precip probability already covers the near-term window in the blend.
 
-4. **Demote or remove `precip_probability` (pop12)** — currently produces 0 extractions in standard core files. Confirmed not useful for quasi-hourly app.
+4. ~~**Demote or remove `precip_probability` (pop12)**~~ — **done (2026-03).** Removed from NBM variable registry. Confirmed absent from all standard core files; not usable for quasi-hourly app.
 
-5. **Consider `apparent_temperature` as primary feels-like output** over our derived heat_index/wind_chill — it's an NBM-native blended product likely with better calibration.
+5. ~~**Consider `apparent_temperature` as primary feels-like output**~~ — **done (2026-02).** `apparent_temperature` (`aptmp`) is now the primary feels-like field. `heat_index` and `wind_chill` derived variables removed.
 
-6. **Consider `SnowAmt01`** for Phase 2 — hourly snow accumulation through 36h would add meaningful value to a quasi-hourly UX in winter conditions.
+6. **Consider `SnowAmt01`** for extended winter UX — hourly snow accumulation through 36h. Low priority; NDFD `snowfall` (days 1–3) partially covers this via the blend.
