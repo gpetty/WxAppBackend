@@ -10,6 +10,9 @@ Checks one service per invocation:
 For each service, checks:
   1. The FastAPI /status endpoint responds within timeout.
   2. The forecast cycle is no older than MAX_AGE_H hours.
+  3. The forecast cycle has at least MIN_TIME_STEPS time steps — a cycle
+     can be perfectly fresh yet truncated if upstream data was incomplete
+     when it was ingested (see the 2026-09-23 NBM S3 lag incident).
 
 On success: pings healthchecks.io (HC_UUID) with a success ping.
 On failure: pings healthchecks.io at /fail and sends an alert email.
@@ -24,7 +27,7 @@ import json
 import subprocess
 import sys
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 ALERT_EMAIL = "grantwp3@gmail.com"
 
@@ -35,31 +38,44 @@ ALERT_EMAIL = "grantwp3@gmail.com"
 # All three services use the same MAX_AGE_H (6h) after the NBM cadence
 # change to 3-hourly (matching NDFD).
 
+#
+# min_time_steps: alert if the committed cycle has fewer forecast steps
+# than this. A full NBM cycle is 99 slabs; NDFD runs 59–65 depending on
+# the cycle. Thresholds are set below the normal range so routine
+# variation doesn't alert, but a badly truncated cycle does.
+# None = skip the check (blend /status exposes no step count; its two
+# stores are covered by the nbm and ndfd monitors).
+
 SERVICE_CONFIGS: dict[str, dict] = {
     "nbm": {
-        "status_url":    "http://127.0.0.1:8001/status",
-        "hc_uuid":       "1ffbadd7-5c6b-4217-a709-b272eec6476f",
-        "max_age_h":     6.0,
-        "runtime_field": "runtime",                    # field in /status response
-        "label":         "NBM API",
+        "status_url":      "http://127.0.0.1:8001/status",
+        "hc_uuid":         "1ffbadd7-5c6b-4217-a709-b272eec6476f",
+        "max_age_h":       6.0,
+        "runtime_field":   "runtime",                  # field in /status response
+        "min_time_steps":  90,                         # full cycle = 99
+        "label":           "NBM API",
     },
     "ndfd": {
-        "status_url":    "http://127.0.0.1:8002/status",
-        "hc_uuid":       "1ffbadd7-5c6b-4217-a709-b272eec6476f",
-        "max_age_h":     6.0,
-        "runtime_field": "runtime",
-        "label":         "NDFD API",
+        "status_url":      "http://127.0.0.1:8002/status",
+        "hc_uuid":         "1ffbadd7-5c6b-4217-a709-b272eec6476f",
+        "max_age_h":       6.0,
+        "runtime_field":   "runtime",
+        "min_time_steps":  50,                         # normal range 59–65
+        "label":           "NDFD API",
     },
     "blend": {
-        "status_url":    "http://127.0.0.1:8004/status",
-        "hc_uuid":       "1ffbadd7-5c6b-4217-a709-b272eec6476f",
-        "max_age_h":     6.0,
+        "status_url":      "http://127.0.0.1:8004/status",
+        "hc_uuid":         "1ffbadd7-5c6b-4217-a709-b272eec6476f",
+        "max_age_h":       6.0,
         # Blend /status has separate nbm_runtime and ndfd_runtime.
         # We check the older of the two; either stale means the blend is stale.
-        "runtime_field": ["nbm_runtime", "ndfd_runtime"],
-        "label":         "Blend API",
+        "runtime_field":   ["nbm_runtime", "ndfd_runtime"],
+        "min_time_steps":  None,                       # no step count in /status
+        "label":           "Blend API",
     },
 }
+
+STEPS_FIELD = "n_time_steps"
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +136,49 @@ def _oldest_runtime(status: dict, runtime_field) -> datetime:
 
 
 # ---------------------------------------------------------------------------
+# Checks — pure functions returning a failure message, or None if OK
+# ---------------------------------------------------------------------------
+
+def check_freshness(
+    status: dict,
+    runtime_field,
+    max_age_h: float,
+    now: datetime,
+) -> str | None:
+    """Fail if the committed cycle is older than *max_age_h* hours."""
+    try:
+        oldest = _oldest_runtime(status, runtime_field)
+    except (KeyError, ValueError) as exc:
+        return f"runtime field missing or malformed: {exc}"
+
+    age_h = (now - oldest).total_seconds() / 3600
+    if age_h > max_age_h:
+        return f"Forecast cycle stale: {age_h:.1f}h old (limit {max_age_h}h)"
+    return None
+
+
+def check_completeness(status: dict, min_time_steps: int | None) -> str | None:
+    """
+    Fail if the committed cycle has fewer than *min_time_steps* forecast
+    steps. A truncated cycle passes the freshness check but silently
+    shortens the forecast horizon, so it needs its own check.
+
+    *min_time_steps* of None skips the check entirely.
+    """
+    if min_time_steps is None:
+        return None
+
+    n_steps = status.get(STEPS_FIELD)
+    if n_steps is None:
+        return f"status response has no {STEPS_FIELD} field"
+
+    if n_steps < min_time_steps:
+        return (f"Forecast cycle truncated: {n_steps} time steps "
+                f"(expected at least {min_time_steps})")
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -132,11 +191,12 @@ def main() -> None:
     service = sys.argv[1]
     cfg     = SERVICE_CONFIGS[service]
 
-    label         = cfg["label"]
-    status_url    = cfg["status_url"]
-    hc_uuid       = cfg["hc_uuid"]
-    max_age_h     = cfg["max_age_h"]
-    runtime_field = cfg["runtime_field"]
+    label          = cfg["label"]
+    status_url     = cfg["status_url"]
+    hc_uuid        = cfg["hc_uuid"]
+    max_age_h      = cfg["max_age_h"]
+    runtime_field  = cfg["runtime_field"]
+    min_time_steps = cfg["min_time_steps"]
 
     # --- Check 1: API responsiveness ---
     try:
@@ -149,29 +209,31 @@ def main() -> None:
         _email(f"{label} not responding", msg)
         sys.exit(1)
 
-    # --- Check 2: Cycle freshness ---
-    try:
-        oldest = _oldest_runtime(status, runtime_field)
-    except (KeyError, ValueError) as exc:
-        msg = f"FAIL [{label}]: runtime field missing or malformed: {exc}"
-        _log(msg)
-        _ping(hc_uuid, "fail", msg)
-        _email(f"{label} status malformed", msg)
-        sys.exit(1)
+    now = datetime.now(timezone.utc)
 
-    age = datetime.now(timezone.utc) - oldest
-    if age > timedelta(hours=max_age_h):
-        hours = age.total_seconds() / 3600
-        msg = (f"FAIL [{label}]: Forecast cycle stale: {hours:.1f}h old "
-               f"(limit {max_age_h}h)")
+    # --- Check 2: Cycle freshness ---
+    failure = check_freshness(status, runtime_field, max_age_h, now)
+    if failure:
+        msg = f"FAIL [{label}]: {failure}"
         _log(msg)
         _ping(hc_uuid, "fail", msg)
         _email(f"{label} forecast cycle stale", msg)
         sys.exit(1)
 
+    # --- Check 3: Cycle completeness ---
+    failure = check_completeness(status, min_time_steps)
+    if failure:
+        msg = f"FAIL [{label}]: {failure}"
+        _log(msg)
+        _ping(hc_uuid, "fail", msg)
+        _email(f"{label} forecast cycle truncated", msg)
+        sys.exit(1)
+
     # --- All good ---
-    age_h = age.total_seconds() / 3600
-    _log(f"OK [{label}]: cycle age={age_h:.2f}h (limit {max_age_h}h)")
+    age_h = (now - _oldest_runtime(status, runtime_field)).total_seconds() / 3600
+    steps = status.get(STEPS_FIELD)
+    steps_note = f", steps={steps}" if steps is not None else ""
+    _log(f"OK [{label}]: cycle age={age_h:.2f}h (limit {max_age_h}h){steps_note}")
     _ping(hc_uuid)
 
 

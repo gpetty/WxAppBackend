@@ -65,7 +65,9 @@ def list_available_elements(
     try:
         paths = fs.ls(prefix)
     except Exception as e:
-        log.warning(f"S3 listing failed for {prefix}: {e}")
+        # FileNotFoundError here means the prefix isn't on S3 yet (upstream
+        # lag); any other type is a real access problem. See ingest.py.
+        log.warning(f"S3 listing failed for {prefix}: {type(e).__name__}: {e}")
         return set()
     elements = set()
     for p in paths:

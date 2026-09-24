@@ -104,7 +104,15 @@ def list_available_fxx(
             return sorted(fxx_list)
         log.warning("S3 listing returned no matching files; using fallback schedule")
     except Exception as exc:
-        log.warning(f"S3 listing failed ({exc}); using fallback schedule")
+        # Log the exception *type* as well as its message: s3fs raises
+        # FileNotFoundError whose str() is just the bucket path, which is
+        # indistinguishable from a network/credential failure in the log.
+        # "FileNotFoundError" means the cycle prefix is not on S3 yet
+        # (upstream publication lag); anything else is a real access problem.
+        log.warning(
+            f"S3 listing failed ({type(exc).__name__}: {exc}); "
+            f"using fallback schedule"
+        )
 
     return nbm_forecast_hours(fxx_max)
 
