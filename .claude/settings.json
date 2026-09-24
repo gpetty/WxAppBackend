@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /12TB1/FCST_series/ 2>/dev/null && echo \"EXISTS\" || echo \"MISSING\")",
+      "Read(//12TB1/FCST_series/**)"
+    ]
+  }
+}

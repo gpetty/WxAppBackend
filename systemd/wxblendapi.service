@@ -31,10 +31,11 @@ Restart=always
 RestartSec=5
 StartLimitIntervalSec=300
 StartLimitBurst=5
-# The blend service's data is file-backed mmaps shared with wxapi and wxndfdapi —
-# those pages are already resident and charged to the other services' cgroups.
-# Private process overhead (gunicorn + Python + pandas) is modest.
-MemoryHigh=6G
+# The blend service maintains its own mmaps of both the NBM and NDFD slab
+# ring buffers (~5.4k + ~2.9k mappings). These are reclaimable file-backed
+# pages but are charged to this cgroup, so steady-state usage sits near 6G.
+# MemoryHigh raised to 7G (from 6G) to leave reclaim headroom; hard cap 8G.
+MemoryHigh=7G
 MemoryMax=8G
 MemorySwapMax=0
 LimitNOFILE=65536

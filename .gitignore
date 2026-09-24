@@ -32,3 +32,6 @@ nohup.out
 *.code-workspace
 Caddyfile.tmp
 SINGLE_SOURCE_OPTION.md
+
+# Claude Code local (machine-specific permission grants)
+.claude/settings.local.json
